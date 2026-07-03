@@ -19,6 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .safepath import ensure_within, safe_component
 from .settings import get_settings
 
 _LOCK = threading.RLock()
@@ -30,8 +31,9 @@ def _now() -> str:
 
 class Project:
     def __init__(self, name: str):
-        self.name = name
-        self.root = get_settings().projects_dir / name
+        self.name = safe_component(name, "project")
+        projects_dir = get_settings().projects_dir
+        self.root = ensure_within(projects_dir, projects_dir / self.name)
 
     # ---- paths ----
     @property
@@ -51,7 +53,7 @@ class Project:
         return self.dataset_dir / "processed_files.txt"
 
     def spot_audio_dir(self, spot: str) -> Path:
-        return self.root / spot / "audio"
+        return ensure_within(self.root, self.root / safe_component(spot, "spot") / "audio")
 
     def exists(self) -> bool:
         return self.meta_path.is_file()

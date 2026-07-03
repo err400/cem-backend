@@ -1,22 +1,51 @@
-"""Activity log: one JSONL line per user action, split day-wise.
+"""Activity log: one JSONL line per user action.
 
-    <LOG_DIR>/activity-YYYY-MM-DD.jsonl
+    <LOG_DIR>/activity.jsonl        current file (grows to ~10MB)
+    <LOG_DIR>/activity.jsonl.1..N   size-rotated backups
 
 Each line records who did what (user identity from request headers) plus enough
 context to find the run's own logs under data/jobs/<job_id>/. The `service` field
 keeps the format shared, so other backends (e.g. drone) can write the same shape.
 """
 import json
+import logging
 import shutil
-import threading
 from datetime import datetime, timezone
+from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from threading import Lock
 from typing import Optional
 
 from .settings import get_settings
 
-_LOCK = threading.Lock()
 _SERVICE = "cem-backend"
+_MAX_BYTES = 10 * 1024 * 1024
+_BACKUP_COUNT = 10
+
+_LOCK = Lock()
+_LOGGER: Optional[logging.Logger] = None
+
+
+def _logger() -> logging.Logger:
+    global _LOGGER
+    if _LOGGER is None:
+        with _LOCK:
+            if _LOGGER is None:
+                log_dir = get_settings().LOG_DIR
+                log_dir.mkdir(parents=True, exist_ok=True)
+                handler = RotatingFileHandler(
+                    log_dir / "activity.jsonl",
+                    maxBytes=_MAX_BYTES,
+                    backupCount=_BACKUP_COUNT,
+                    encoding="utf-8",
+                )
+                handler.setFormatter(logging.Formatter("%(message)s"))
+                logger = logging.getLogger("cem.activity")
+                logger.setLevel(logging.INFO)
+                logger.propagate = False
+                logger.addHandler(handler)
+                _LOGGER = logger
+    return _LOGGER
 
 
 def append(user: dict, action: str, **fields) -> None:
@@ -29,14 +58,7 @@ def append(user: dict, action: str, **fields) -> None:
         "action": action,
     }
     entry.update({k: v for k, v in fields.items() if v is not None})
-
-    log_dir = get_settings().LOG_DIR
-    log_dir.mkdir(parents=True, exist_ok=True)
-    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    path = log_dir / f"activity-{day}.jsonl"
-    with _LOCK:
-        with open(path, "a", encoding="utf-8") as f:
-            f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    _logger().info(json.dumps(entry, ensure_ascii=False))
 
 
 def copy_run_log(src: Path, job_id: str, step: str) -> Optional[str]:

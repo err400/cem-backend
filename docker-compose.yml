@@ -16,8 +16,6 @@ services:
       STAC_ENABLED: ${STAC_ENABLED:-true}
       STAC_COLLECTION: ${STAC_COLLECTION:-cem-bioacoustics}
       STAC_ASSET_BASE_URL: ${STAC_ASSET_BASE_URL:-}
-      FILE_BROWSER_BASE_URL: ${FILE_BROWSER_BASE_URL:-}
-      FILE_BROWSER_PATH_TEMPLATE: ${FILE_BROWSER_PATH_TEMPLATE:-{base}/{job_rel}}
       # Output retention (item 15). Cluster = compute, not storage. 0 disables.
       RETENTION_HOURS: ${RETENTION_HOURS:-168}
       RETENTION_SWEEP_MINUTES: ${RETENTION_SWEEP_MINUTES:-60}

@@ -24,13 +24,12 @@ class Settings:
         self.PIPELINE_DIR: Path = Path(os.environ.get("PIPELINE_DIR", "/app/pipeline")).resolve()
         self.PYTHON_BIN: str = os.environ.get("PYTHON_BIN", "python")
         self.MAX_UPLOAD_MB: int = int(os.environ.get("MAX_UPLOAD_MB", "2048"))
+        # Cap on concurrent synchronous pipeline runs. Kept well under the AnyIO
+        # threadpool (40) so sync endpoints and health never starve for a token.
+        self.MAX_CONCURRENT_RUNS: int = int(os.environ.get("MAX_CONCURRENT_RUNS", "8"))
         self.STAC_ENABLED: bool = _bool(os.environ.get("STAC_ENABLED"), True)
         self.STAC_COLLECTION: str = os.environ.get("STAC_COLLECTION", "cem-bioacoustics")
         self.STAC_ASSET_BASE_URL: str = os.environ.get("STAC_ASSET_BASE_URL", "").rstrip("/")
-        self.FILE_BROWSER_BASE_URL: str = os.environ.get("FILE_BROWSER_BASE_URL", "").rstrip("/")
-        self.FILE_BROWSER_PATH_TEMPLATE: str = os.environ.get(
-            "FILE_BROWSER_PATH_TEMPLATE", "{base}/{job_rel}"
-        )
         self.RETENTION_HOURS: float = float(os.environ.get("RETENTION_HOURS", "168"))
         self.RETENTION_SWEEP_MINUTES: float = float(os.environ.get("RETENTION_SWEEP_MINUTES", "60"))
         self.STACD_WORKSPACE_ID: str = os.environ.get("STACD_WORKSPACE_ID", "")
@@ -75,16 +74,12 @@ class Settings:
         return self.DATA_DIR / "jobs_index"
 
     @property
+    def run_locks_dir(self) -> Path:
+        return self.DATA_DIR / "run_locks"
+
+    @property
     def airflow_enabled(self) -> bool:
         return bool(self.AIRFLOW_BASE_URL)
-
-    def file_browser_url(self, job_id: str) -> str | None:
-        if not self.FILE_BROWSER_BASE_URL:
-            return None
-        return self.FILE_BROWSER_PATH_TEMPLATE.format(
-            base=self.FILE_BROWSER_BASE_URL, job_rel=f"jobs/{job_id}"
-        )
-
 
 @lru_cache
 def get_settings() -> Settings:

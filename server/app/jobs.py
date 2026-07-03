@@ -25,6 +25,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
 
+from .safepath import ensure_within, safe_component
 from .settings import get_settings
 
 _LOCK = threading.RLock()
@@ -220,10 +221,15 @@ def _write_index(job_id: str, project: str, script: str, root: Path) -> None:
     d = _index_dir()
     d.mkdir(parents=True, exist_ok=True)
     entry = {"job_id": job_id, "project": project, "script": script, "root": str(root)}
-    (d / f"{job_id}.json").write_text(json.dumps(entry))
+    index_path = ensure_within(d, d / f"{safe_component(job_id, 'job_id')}.json")
+    index_path.write_text(json.dumps(entry))
 
 
 def _read_index(job_id: str) -> Optional[dict]:
+    try:
+        job_id = safe_component(job_id, "job_id")
+    except ValueError:
+        return None
     p = _index_dir() / f"{job_id}.json"
     if p.is_file():
         return json.loads(p.read_text())
@@ -244,9 +250,13 @@ def create_job(project_name: str, script: str, job_id: str) -> Job:
     """
     if not job_id:
         raise ValueError("job_id is required.")
+    project_name = safe_component(project_name, "project")
+    script = safe_component(script, "script")
+    job_id = safe_component(job_id, "job_id")
     with _LOCK:
         s = get_settings()
-        root = s.projects_dir / project_name / script / job_id
+        root = ensure_within(
+            s.projects_dir, s.projects_dir / project_name / script / job_id)
         job = Job(root, job_id)
         if job.exists():
             # Idempotent: refresh the index (cheap) and return as-is.

@@ -4,7 +4,7 @@
 Three-part pipeline (mirrors birdnet_predictions.py architecture):
   1. File listing  — discover, filter, deduplicate WAV files
   2. Main pipeline — compute 6 acoustic indices per file, append to aggregate CSV
-  3. Plotting      — generate per-index box plots across monitoring sites
+  3. Plotting      — per-spot box plots of each index, bucketed by hour of day
 
 Indices computed (Section 3.2.2):
   ADI  — Acoustic Diversity Index (Shannon entropy of frequency band energy)
@@ -23,6 +23,7 @@ Performance optimizations (vs. original):
 """
 
 import os
+import re
 import numpy as np
 import pandas as pd
 import soundfile as sf
@@ -366,28 +367,41 @@ def write_output_and_plots(aggregate_path, output_dir, input_directories,
     else:
         df["Spot"] = "Unknown"
 
+    if "hour" not in df.columns:
+        print("No 'hour' column; cannot make per-hour boxplots.")
+        return
+    df = df[pd.to_numeric(df["hour"], errors="coerce").notna()].copy()
+    df["hour"] = pd.to_numeric(df["hour"]).astype(int)
+
     print("Generating box plots...")
+    spots = sorted(df["Spot"].unique())
     for index_name in INDICES_TO_PLOT:
         if index_name not in df.columns:
             print(f"  WARNING: {index_name} not in data, skipping.")
             continue
 
-        plt.figure(figsize=(10, 6))
-        sns.boxplot(
-            data=df, x="Spot", y=index_name,
-            order=sorted(df["Spot"].unique()),
-            palette="Set2",
-        )
-        plt.title(f"Distribution of {index_name} Across Monitoring Sites", fontsize=16)
-        plt.xlabel("Monitoring Site", fontsize=12)
-        plt.ylabel(f"{index_name} Value", fontsize=12)
-        plt.grid(axis="y", linestyle="--", alpha=0.7)
-        plt.tight_layout()
-        plt.savefig(
-            os.path.join(output_dir, f"boxplot_{index_name}_all_sites.png"),
-            dpi=300, bbox_inches="tight",
-        )
-        plt.close()
+        for spot in spots:
+            sdf = df[df["Spot"] == spot]
+            if sdf.empty:
+                continue
+
+            plt.figure(figsize=(12, 6))
+            sns.boxplot(
+                data=sdf, x="hour", y=index_name,
+                order=list(range(24)),
+                palette="Set2",
+            )
+            plt.title(f"{index_name} by Hour - {spot}", fontsize=16)
+            plt.xlabel("Hour of Day", fontsize=12)
+            plt.ylabel(f"{index_name} Value", fontsize=12)
+            plt.grid(axis="y", linestyle="--", alpha=0.7)
+            plt.tight_layout()
+            safe_spot = re.sub(r"[^\w.-]", "_", str(spot))
+            plt.savefig(
+                os.path.join(output_dir, f"boxplot_{index_name}_{safe_spot}.png"),
+                dpi=300, bbox_inches="tight",
+            )
+            plt.close()
 
     summary_rows = []
     for index_name in INDICES_TO_PLOT:

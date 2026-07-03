@@ -5,7 +5,6 @@ CEM Server API -- clean 3-group design.
   2. Scripts -- single synchronous algorithm endpoint (script name in body).
   3. Polling & download -- job status, results, files.
 """
-import json
 import os
 
 import zipfile
@@ -25,6 +24,7 @@ from . import pipeline_meta as meta
 from . import projects as projectstore
 from . import runner
 from . import stac
+from .safepath import UnsafeComponent, safe_component
 from .settings import get_settings
 
 router = APIRouter(prefix="/api/v1", tags=["cem"])
@@ -41,7 +41,16 @@ def _user(
     return {"email": x_user_email, "id": x_user_id}
 
 
+def _component(value, field: str) -> str:
+    """Validate a client-supplied path component; 400 on anything unsafe."""
+    try:
+        return safe_component(value, field)
+    except UnsafeComponent as e:
+        raise HTTPException(400, str(e))
+
+
 def _require_job(job_id: str) -> jobstore.Job:
+    _component(job_id, "job_id")
     job = jobstore.get_job(job_id)
     if job is None:
         raise HTTPException(404, f"Job '{job_id}' not found.")
@@ -80,6 +89,7 @@ def _save_upload(dest: Path, upload: UploadFile) -> int:
 
 @router.get("/projects/status")
 def project_status(project: str = Query(..., description="Project folder name")):
+    project = _component(project, "project")
     proj = projectstore.get_project(project)
     if proj is None:
         raise HTTPException(404, f"Project '{project}' not found.")
@@ -91,6 +101,7 @@ def check_files(body: dict = Body(...)):
     project = body.get("project")
     if not project:
         raise HTTPException(400, "project is required.")
+    project = _component(project, "project")
     files_by_spot = body.get("files", {})
     if not files_by_spot:
         return {"to_upload": {}}
@@ -98,6 +109,7 @@ def check_files(body: dict = Body(...)):
     proj = projectstore.get_or_create_project(project)
     to_upload = {}
     for spot, filenames in files_by_spot.items():
+        spot = _component(spot, "spot")
         existing = set(proj.list_audio_files(spot))
         needed = [f for f in filenames if f not in existing]
         if needed:
@@ -116,6 +128,8 @@ def project_upload_audio(
         raise HTTPException(400, "No files provided.")
     if not spot.strip():
         raise HTTPException(400, "spot is required.")
+    project = _component(project, "project")
+    spot = _component(spot, "spot")
 
     proj = projectstore.get_or_create_project(project)
     audio_dir = proj.spot_audio_dir(spot)
@@ -154,6 +168,7 @@ def project_upload_aggregate(
     project: str = Form(..., description="Project folder name"),
     file: UploadFile = File(...),
 ):
+    project = _component(project, "project")
     proj = projectstore.get_or_create_project(project)
     proj.dataset_dir.mkdir(parents=True, exist_ok=True)
     _save_upload(proj.aggregate_path, file)
@@ -166,6 +181,7 @@ def project_upload_processed(
     project: str = Form(..., description="Project folder name"),
     file: UploadFile = File(...),
 ):
+    project = _component(project, "project")
     proj = projectstore.get_or_create_project(project)
     proj.dataset_dir.mkdir(parents=True, exist_ok=True)
     _save_upload(proj.processed_path, file)
@@ -214,8 +230,6 @@ def _browse_href(job: jobstore.Job, rel: str) -> Optional[str]:
     s = get_settings()
     if s.STAC_ASSET_BASE_URL:
         return f"{s.STAC_ASSET_BASE_URL}/jobs/{job.id}/{rel}"
-    if s.FILE_BROWSER_BASE_URL:
-        return f"{s.FILE_BROWSER_BASE_URL}/jobs/{job.id}/{rel}"
     return None
 
 
@@ -279,6 +293,14 @@ def _ensure_dependencies(step: str, body: dict):
     return None
 
 
+def _matching_task(job: jobstore.Job, step: str, params: dict) -> Optional[dict]:
+    """Most recent task for this job with the same step and identical params."""
+    for t in reversed(job.read().get("tasks", [])):
+        if t.get("step") == step and t.get("params") == params:
+            return t
+    return None
+
+
 def _run_script(script_name: str, body: dict):
     script_name = _resolve_script_name(script_name)
     if not meta.is_valid_step(script_name):
@@ -290,6 +312,8 @@ def _run_script(script_name: str, body: dict):
         raise HTTPException(400, "project is required.")
     if not spots:
         raise HTTPException(400, "spots is required (list of spot names).")
+    project = _component(project, "project")
+    spots = [_component(s, "spot") for s in spots]
 
     start_date = body.get("start_date")
     end_date = body.get("end_date")
@@ -306,6 +330,7 @@ def _run_script(script_name: str, body: dict):
     client_job_id = body.get("job_id")
     if not client_job_id:
         raise HTTPException(400, "job_id is required (minted by the client).")
+    client_job_id = _component(client_job_id, "job_id")
     job = jobstore.create_job(project, script_name, job_id=client_job_id)
     stats = proj.populate_job(job, spots=spots, start_date=start_date, end_date=end_date)
 
@@ -319,7 +344,19 @@ def _run_script(script_name: str, body: dict):
     if end_date:
         run_params["end_date"] = end_date
 
-    task = runner.run_sync(job, script_name, run_params)
+    # Run-level idempotency: a prior successful task with identical params is
+    # returned as-is (no blind re-run). A concurrent run of the same job (lock
+    # held) is 409; global saturation is 429.
+    existing = _matching_task(job, script_name, run_params)
+    if existing is not None and existing.get("status") == "success":
+        task = existing
+    else:
+        try:
+            task = runner.run_sync(job, script_name, run_params)
+        except runner.JobBusy:
+            raise HTTPException(409, f"A run for job '{job.id}' is already in progress.")
+        except runner.CapacityError:
+            raise HTTPException(429, "Server is at capacity; too many analyses running. Retry shortly.")
     task_id = task["task_id"]
 
     activity_log.copy_run_log(
@@ -406,6 +443,7 @@ def analyze(body: dict = Body(...), user: dict = Depends(_user)):
     job_id = body.get("job_id")
     if not job_id:
         raise HTTPException(400, "job_id is required (minted by the client).")
+    job_id = _component(job_id, "job_id")
 
     activity_log.append(
         user, "run_analysis",
@@ -429,6 +467,9 @@ def analyze(body: dict = Body(...), user: dict = Depends(_user)):
         raise HTTPException(400, "project is required.")
     if not spots:
         raise HTTPException(400, "spots is required (list of spot names).")
+    project = _component(project, "project")
+    for s in spots:
+        _component(s, "spot")
     if projectstore.get_project(project) is None:
         raise HTTPException(404, f"Project '{project}' not found.")
 

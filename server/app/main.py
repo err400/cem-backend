@@ -58,7 +58,7 @@ app.add_middleware(
 # health (no auth)
 # --------------------------------------------------------------------------- #
 @app.get("/health")
-def health():
+async def health():
     return {
         "status": "ok",
         "api_version": get_settings().API_VERSION,

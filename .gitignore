@@ -9,6 +9,15 @@
 data/*
 !data/.gitkeep
 
+# ---- Logs ----
+logs/
+*.log
+
+# ---- Tests ----
+tests/
+
+# ---- Docs ----
+*.md
 
 # ---- Python ----
 __pycache__/
@@ -18,9 +27,13 @@ __pycache__/
 venv/
 server/.venv/
 
+# ---- Caches ----
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+
 # ---- Build / packaging ----
 *.zip
-*.log
 build/
 dist/
 
@@ -29,6 +42,3 @@ dist/
 Thumbs.db
 .idea/
 .vscode/
-
-.gitignore
-FILE_MAP.md

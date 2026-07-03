@@ -6,7 +6,6 @@ birdnet   -> raw WAV in, aggregate CSV + filtered output CSV out
 the rest  -> aggregate CSV in, PNG/CSV results out
 """
 import json
-from functools import lru_cache
 
 from .settings import get_settings
 

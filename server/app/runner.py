@@ -10,12 +10,16 @@ what the STACD/Airflow algorithm API requires (no task polling on this server).
 """
 import shutil
 import subprocess
+import threading
 from datetime import datetime, timezone
 
 from . import pipeline_meta as meta
 from . import stac
 from .jobs import Job
+from .locks import JobBusy, job_run_lock
 from .settings import get_settings
+
+__all__ = ["run_sync", "build_command", "JobBusy", "CapacityError", "RunError"]
 
 _DEFAULT_START = "19700101"
 _DEFAULT_END = "20991231"
@@ -43,6 +47,27 @@ class BadRequestError(RunError):
 class NoDataError(RunError):
     code = "NO_DATA"
     http_status = 404
+
+
+class CapacityError(Exception):
+    """Raised when the concurrent-run cap is reached; maps to HTTP 429."""
+
+
+# Global cap on concurrent synchronous runs. Sized from settings (well under the
+# AnyIO threadpool) so heavy runs can never starve every worker token. Built lazily
+# and non-blocking so a saturated server answers 429 instead of queueing threads.
+_run_semaphore: "threading.BoundedSemaphore | None" = None
+_run_semaphore_lock = threading.Lock()
+
+
+def _get_semaphore() -> threading.BoundedSemaphore:
+    global _run_semaphore
+    if _run_semaphore is None:
+        with _run_semaphore_lock:
+            if _run_semaphore is None:
+                _run_semaphore = threading.BoundedSemaphore(
+                    get_settings().MAX_CONCURRENT_RUNS)
+    return _run_semaphore
 
 
 def _now() -> str:
@@ -281,9 +306,20 @@ def _execute(job: Job, task_id: str, step: str, params: dict) -> None:
 def run_sync(job: Job, step: str, params: dict) -> dict:
     """Run a step to completion on the calling thread (BLOCKING) and return the
     final task record. Used by the STACD/Airflow synchronous algorithm API,
-    where the HTTP response itself is the completion signal (no polling)."""
+    where the HTTP response itself is the completion signal (no polling).
+
+    Guarded twice: a global semaphore caps total concurrent runs (``CapacityError``
+    -> 429), and a per-job advisory lock serialises same-job runs so a duplicate
+    cannot race the shared ``work/`` outputs (``JobBusy`` -> 409)."""
     if not meta.is_valid_step(step):
         raise ValueError(f"Unknown step '{step}'")
-    task = job.add_task(step, params)
-    _execute(job, task["task_id"], step, params)
-    return job.get_task(task["task_id"])
+    sem = _get_semaphore()
+    if not sem.acquire(blocking=False):
+        raise CapacityError("Too many analyses running; retry shortly.")
+    try:
+        with job_run_lock(get_settings().run_locks_dir, job.id):
+            task = job.add_task(step, params)
+            _execute(job, task["task_id"], step, params)
+            return job.get_task(task["task_id"])
+    finally:
+        sem.release()
