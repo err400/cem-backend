@@ -4,12 +4,14 @@ Output retention cleanup.
 Jobs now live inside projects: <DATA_DIR>/projects/<project>/<script>/<job_id>/.
 The sweeper walks all project/script dirs and removes expired job dirs.
 """
+import json
 import shutil
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
+from . import filebrowser_client as fb
 from .settings import get_settings
 from . import pipeline_meta as meta
 
@@ -18,6 +20,26 @@ def _last_activity(job_dir: Path) -> float:
     """Job last-activity time. job.json is rewritten on every task update, so its
     mtime tracks activity in O(1) — no need to walk the whole tree each sweep."""
     return (job_dir / "job.json").stat().st_mtime
+
+
+def _revoke_shares(job_dir: Path) -> None:
+    """Best-effort: revoke any FileBrowser share links before the job dir is
+    deleted, so no public link outlives the folder it points to. Never raises
+    and never blocks the sweep — a down FileBrowser just leaves the share to
+    404 on its own once the folder is gone."""
+    if not fb.is_configured():
+        return
+    try:
+        meta_d = json.loads((job_dir / "job.json").read_text())
+    except Exception:
+        return
+    for share in (meta_d.get("shares") or {}).values():
+        h = share.get("hash") if isinstance(share, dict) else None
+        if h:
+            try:
+                fb.delete_share(h)
+            except Exception:
+                pass
 
 
 def sweep_once(retention_hours: float | None = None) -> list[str]:
@@ -44,6 +66,7 @@ def sweep_once(retention_hours: float | None = None) -> list[str]:
                     continue
                 try:
                     if _last_activity(job_dir) < cutoff:
+                        _revoke_shares(job_dir)
                         shutil.rmtree(job_dir, ignore_errors=True)
                         idx = s.jobs_index_dir / f"{job_dir.name}.json"
                         idx.unlink(missing_ok=True)

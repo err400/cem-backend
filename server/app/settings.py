@@ -44,6 +44,11 @@ class Settings:
         self.AIRFLOW_PASSWORD: str = os.environ.get("AIRFLOW_PASSWORD", "")
         self.AIRFLOW_DAG_ID: str = os.environ.get("AIRFLOW_DAG_ID", "cem_pipeline")
         self.AIRFLOW_TIMEOUT: float = float(os.environ.get("AIRFLOW_TIMEOUT", "10"))
+        # ---- FileBrowser (optional) ----
+        self.FILEBROWSER_BASE_URL: str = os.environ.get("FILEBROWSER_BASE_URL", "").rstrip("/")
+        self.FILEBROWSER_USERNAME: str = os.environ.get("FILEBROWSER_USERNAME", "")
+        self.FILEBROWSER_PASSWORD: str = os.environ.get("FILEBROWSER_PASSWORD", "")
+        self.FILEBROWSER_TIMEOUT: float = float(os.environ.get("FILEBROWSER_TIMEOUT", "10"))
         # ---- GEE (optional) ----
         self.GEE_PROJECT: str = os.environ.get("GEE_PROJECT", "ee-geeapi")
         self.GEE_SERVICE_ACCOUNT: str = os.environ.get("GEE_SERVICE_ACCOUNT", "")
@@ -80,6 +85,10 @@ class Settings:
     @property
     def airflow_enabled(self) -> bool:
         return bool(self.AIRFLOW_BASE_URL)
+
+    @property
+    def filebrowser_enabled(self) -> bool:
+        return bool(self.FILEBROWSER_BASE_URL)
 
 @lru_cache
 def get_settings() -> Settings:

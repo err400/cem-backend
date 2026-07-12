@@ -29,6 +29,13 @@ services:
       GEE_PROJECT: ${GEE_PROJECT:-ee-geeapi}
       GEE_SERVICE_ACCOUNT: ${GEE_SERVICE_ACCOUNT:-}
       GEE_SERVICE_ACCOUNT_KEY: ${GEE_SERVICE_ACCOUNT_KEY:-}
+      # FileBrowser share links (optional). Blank FILEBROWSER_BASE_URL = feature
+      # disabled, backend just skips share creation everywhere. Set it to
+      # http://filebrowser:80 (the sibling service below) to enable it.
+      FILEBROWSER_BASE_URL: ${FILEBROWSER_BASE_URL:-}
+      FILEBROWSER_USERNAME: ${FILEBROWSER_USERNAME:-admin}
+      FILEBROWSER_PASSWORD: ${FILEBROWSER_PASSWORD:-admin}
+      FILEBROWSER_TIMEOUT: ${FILEBROWSER_TIMEOUT:-10}
     volumes:
       - ${HOST_DATA_DIR:-./data}:/data
       - ${HOST_LOG_DIR:-./logs}:/logs
@@ -36,4 +43,18 @@ services:
       - ./server/app:/app/app
       - ${EARTHENGINE_CREDENTIALS:-~/.config/earthengine}:/root/.config/earthengine:ro
     restart: unless-stopped
- 
+
+  filebrowser:
+    image: filebrowser/filebrowser
+    container_name: cem-filebrowser
+    ports:
+      - "8097:80"
+    volumes:
+      # Same host folder the api container writes results into — this is the
+      # only connection between the two services; they never talk directly.
+      - ${HOST_DATA_DIR:-./data}:/srv
+      - filebrowser_db:/database
+    restart: unless-stopped
+
+volumes:
+  filebrowser_db:

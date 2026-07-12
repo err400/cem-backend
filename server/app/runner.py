@@ -13,6 +13,7 @@ import subprocess
 import threading
 from datetime import datetime, timezone
 
+from . import filebrowser_client as fb
 from . import pipeline_meta as meta
 from . import stac
 from .jobs import Job
@@ -301,6 +302,23 @@ def _execute(job: Job, task_id: str, step: str, params: dict) -> None:
         task_id, status="success", finished_at=_now(), returncode=rc,
         error=None, error_code=None, results=results, stac_warning=stac_warning,
     )
+
+    # Best-effort: expose this step's results via FileBrowser, if configured.
+    # Never affects the task's recorded status above — a down/misconfigured
+    # FileBrowser must not turn a successful run into a failure.
+    try:
+        if fb.is_configured():
+            # birdnet's real outputs live in work/, not results/<step>/ (see
+            # _result_files above); every other step's outputs live under
+            # its own results dir.
+            share_dir = job.work_dir if step == meta.BIRDNET else job.step_results_dir(step)
+            rel = str(share_dir.relative_to(get_settings().DATA_DIR))
+            share = fb.create_share(rel)
+            if share:
+                job.set_share(step, share)
+    except Exception as e:
+        with open(log_path, "a") as log:
+            log.write(f"\nFILEBROWSER WARNING: share creation failed: {e}\n")
 
 
 def run_sync(job: Job, step: str, params: dict) -> dict:

@@ -614,6 +614,7 @@ def get_job(job_id: str):
         "has_aggregate": job.resolve_aggregate() is not None,
         "tasks": meta_d.get("tasks", []),
         "results": job.list_results(),
+        "shares": meta_d.get("shares") or {},
         "api_version": s.API_VERSION,
     }
 

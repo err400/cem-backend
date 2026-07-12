@@ -207,6 +207,24 @@ class Job:
     def get_dispatch(self) -> dict:
         return self.read().get("dispatch") or {}
 
+    # ---- FileBrowser share links (optional, best-effort) ----
+    def set_share(self, step: str, info: dict) -> None:
+        """Record a FileBrowser share link for a step, keyed by step name so a
+        multi-step job (e.g. an analysis chained after birdnet) can track one
+        share per step's result folder."""
+        with _LOCK:
+            meta = self._read()
+            shares = meta.get("shares") or {}
+            shares[step] = info
+            meta["shares"] = shares
+            self._write(meta)
+
+    def get_share(self, step: str) -> Optional[dict]:
+        return (self.read().get("shares") or {}).get(step)
+
+    def get_shares(self) -> dict:
+        return self.read().get("shares") or {}
+
 
 # ---------------------------------------------------------------------------
 # Job index — maps job_id -> {project, script, root_path}
