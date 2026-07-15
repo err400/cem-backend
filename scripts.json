@@ -1,22 +1,5 @@
 {
   "modules": [
     "pipeline"
-  ],
-  "hashes": {
-    "requirements.txt": "266dc1469f844baf7b8888124c2f2cc53eb44330628e32e4158d00fcaa84ec55",
-    "pipeline/manifest.json": "e878ffdbfe0a6b42e0863c5c8e8d8dcb7144864788e792d28669bd864773e8a8",
-    "pipeline/birdnet_predictions.py": "469e9d64f1d3ececed5d0e2c5033a21cb58175b0816580608ec3e87f3e546a2a",
-    "pipeline/config.py": "8d08c1050056605b6a6f82c07184dcd08216d93fa491f4a6954b8514d2ca6122",
-    "pipeline/file_metadata.py": "8a54c043150f615933e195dab66b1a8e6b384f457fe5b2f0a682b4817fa46b57",
-    "pipeline/static_noise.wav": "14df0a06d52223db620ecfed57f7b0e95daa9b6491941919d5bcca8f247ba44c",
-    "pipeline/rain_noise.wav": "195316cd131df873018d7132d3afa8c2c1d5033d7e60a6d4db9b9d47010d360e",
-    "pipeline/activity_heatmaps.py": "fa9f1cd51ab5b2f94b0ee331a36a2a3752a1b1dfb5fcd022a823d1b7474ad422",
-    "pipeline/filter_utils.py": "04abb10b5aa7984e1f4803dfbe1fa2d797d12a48c232baa2f9c5c12862187a48",
-    "pipeline/ebird_checklist.txt": "a815f633d3b8a3cc0efc83057d2fbea137b6d135e9e3a4413e4741b63d4eedf8",
-    "pipeline/temporal_stickiness.py": "4a73d42faa80394a56806732bbbfc8d7866069d25d04e17605f09836b7c89aeb",
-    "pipeline/spatial_stickiness.py": "2e8da01026a25927837a6c23ddc4734ab3c6460b4122d6af2495796764462f2d",
-    "pipeline/migratory_classification.py": "48c7b4eb47d532e53f744ac7097f7ab98fa6807dabf377f86b095e8acff25f7b",
-    "pipeline/solar_correlation.py": "f09dd77ea72727effd126aa8ce961d42c401f50c951ab262edf46569fb9f6875",
-    "pipeline/daily_call_timeseries.py": "43f7ca082c7fe778aebedb4239da2279bc885750f243874025be559d6a5ea3d5"
-  }
+  ]
 }
