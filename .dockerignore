@@ -10,5 +10,7 @@ data/
 *.zip
 *.log
 .env
+*.env
+.env.*
 .DS_Store
 README.md
