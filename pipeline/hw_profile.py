@@ -124,9 +124,17 @@ def get_profile() -> dict:
     tflite_threads = max(1, cpus // n_workers)
 
     # ── Acoustic indices workers ─────────────────────────────────────────
-    # Much lighter memory footprint (~200 MB each).
-    max_idx_by_ram = max(1, int(ram_gb / 0.5))
-    n_idx = max(1, min(cpus, max_idx_by_ram, 8))
+    # Much lighter memory footprint (~200 MB each) in theory, but real-world
+    # overhead (numpy/scipy/pandas/matplotlib imports + decoded-audio buffers
+    # per worker) is higher; on memory-constrained hosts the 0.5 GB/worker
+    # estimate below can still OOM (BrokenProcessPool). Same escape hatch as
+    # BIRDNET_MAX_WORKERS above: set INDICES_MAX_WORKERS to override.
+    idx_env_override = os.environ.get("INDICES_MAX_WORKERS", "").strip()
+    if idx_env_override.isdigit() and int(idx_env_override) > 0:
+        n_idx = min(int(idx_env_override), cpus)
+    else:
+        max_idx_by_ram = max(1, int(ram_gb / 0.5))
+        n_idx = max(1, min(cpus, max_idx_by_ram, 8))
 
     profile = {
         "cpus": cpus,

@@ -40,6 +40,11 @@ def run_solar_correlation(df, output_dir):
     )
     print(f"Species with sufficient data: {len(valid_birds)}")
 
+    if filtered.empty:
+        print("ERROR: No species have enough repeated-day detections for solar correlation "
+              f"(need >{cfg.MIN_SOLAR_DAYS} days with >10 detections). Skipping.")
+        return
+
     peak = filtered.groupby(
         ["common_name", "Date_Only"]
     )["hour"].agg(lambda x: x.value_counts().idxmax()).reset_index()
