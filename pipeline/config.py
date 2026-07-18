@@ -97,6 +97,11 @@ SPECIES_TO_PLOT:    list[str] | None = None  # 09_timeseries (None = top N)
 #
 # Recognised flags (all optional):
 #   --datasets DIR [DIR ...]     -> INPUT_DIRECTORIES   (dirs scanned recursively)
+#   --datasets-file PATH         -> INPUT_DIRECTORIES   (newline-delimited; used instead
+#                                                         of --datasets when the watcher has
+#                                                         too many dirs for a CLI arg list)
+#   --dataset-spots S [S ...]    -> DATASET_SPOTS       (spot per INPUT_DIRECTORIES entry)
+#   --dataset-spots-file PATH    -> DATASET_SPOTS       (newline-delimited variant)
 #   --input-file-list F [F ...]  -> INPUT_FILE_LIST     (explicit reference files)
 #   --aggregate-file PATH        -> AGGREGATE_FILE
 #   --aggregate-file-indices PATH -> AGGREGATE_FILE_INDICES (acoustic_indices)
@@ -129,6 +134,9 @@ def apply_overrides(argv=None) -> None:
 
     p = argparse.ArgumentParser(add_help=False)
     p.add_argument("--datasets", nargs="*", default=None)
+    p.add_argument("--datasets-file", default=None)
+    p.add_argument("--dataset-spots", nargs="*", default=None)
+    p.add_argument("--dataset-spots-file", default=None)
     p.add_argument("--input-file-list", nargs="*", default=None)
     p.add_argument("--input-file-spots", nargs="*", default=None)
     p.add_argument("--aggregate-file", default=None)
@@ -158,8 +166,20 @@ def apply_overrides(argv=None) -> None:
     p.add_argument("--max-timeseries-species", default=None)
     args, _unknown = p.parse_known_args(argv)  # ignore watcher extras (--root-dir, ...)
 
+    def _read_lines(path):
+        try:
+            with open(path, "r", encoding="utf-8") as f:
+                return [ln.strip() for ln in f if ln.strip()]
+        except OSError:
+            return []
+
     g = globals()
+    if args.datasets_file:    g["INPUT_DIRECTORIES"] = _read_lines(args.datasets_file)
     if args.datasets:         g["INPUT_DIRECTORIES"] = list(args.datasets)
+    if args.dataset_spots_file:
+        g["DATASET_SPOTS"] = ["" if s == "_" else s for s in _read_lines(args.dataset_spots_file)]
+    if args.dataset_spots:
+        g["DATASET_SPOTS"] = ["" if s == "_" else s for s in args.dataset_spots]
     if args.input_file_list:  g["INPUT_FILE_LIST"] = list(args.input_file_list)
     if args.input_file_spots: g["INPUT_FILE_SPOTS"] = ["" if s == "_" else s for s in args.input_file_spots]
     if args.aggregate_file:   g["AGGREGATE_FILE"] = args.aggregate_file

@@ -17,6 +17,7 @@ from datetime import date
 from tqdm import tqdm
 from concurrent.futures import ProcessPoolExecutor, as_completed
 import io
+import types
 import contextlib
 import multiprocessing
 
@@ -79,43 +80,86 @@ def list_files(
 # =============================================================================
 # PART 2 — MAIN PIPELINE
 # =============================================================================
-def _denoise(audio: np.ndarray, noise_ref: np.ndarray,
-             sr: int | None = None, snr_db: float | None = None) -> np.ndarray:
-    # Read from config at call-time so CLI overrides (e.g. --snr-db) take effect.
-    sr = cfg.TARGET_SR if sr is None else sr
+_DENOISE_NFFT, _DENOISE_HOP = 2048, 512
+
+
+def _noise_threshold(noise_clip: np.ndarray) -> np.ndarray:
+    """Per-frequency gate threshold (mean |STFT| * 1.2) for one noise clip.
+
+    Length-invariant (wrap-padding just repeats the clip), so it is computed
+    ONCE per worker from the resampled clip instead of re-running an STFT over a
+    length-matched copy of the noise for every file.
+    """
+    ns = librosa.stft(noise_clip, n_fft=_DENOISE_NFFT, hop_length=_DENOISE_HOP)
+    return (np.mean(np.abs(ns), axis=1, keepdims=True) * 1.2).astype(np.float32)
+
+
+def _denoise_combined(audio: np.ndarray, noise_clips, noise_thresholds,
+                      sr: int | None = None, snr_db: float | None = None) -> np.ndarray:
+    """Remove every noise source in a SINGLE STFT + ISTFT pass.
+
+    Replaces the previous two sequential `_denoise` calls (static then rain),
+    each of which ran a full STFT+ISTFT plus a per-file noise STFT. Here the
+    noise refs are subtracted in the time domain, one STFT/ISTFT is taken, and
+    the magnitude is gated against the max of the precomputed thresholds.
+    """
     snr_db = cfg.SNR_DB if snr_db is None else snr_db
-    if len(noise_ref) > len(audio):
-        noise_ref = noise_ref[:len(audio)]
-    else:
-        noise_ref = np.pad(noise_ref, (0, len(audio) - len(noise_ref)), "wrap")
 
-    audio_power = np.mean(audio ** 2)
-    noise_power = np.mean(noise_ref ** 2)
-    if noise_power == 0:
-        return audio
-    desired_noise_power = audio_power / (10 ** (snr_db / 10))
-    noise_ref_scaled = noise_ref * np.sqrt(desired_noise_power / noise_power)
+    cleaned = audio.astype(np.float32, copy=True)
+    for noise_ref in noise_clips:
+        if len(noise_ref) > len(cleaned):
+            nr = noise_ref[:len(cleaned)]
+        else:
+            nr = np.pad(noise_ref, (0, len(cleaned) - len(noise_ref)), "wrap")
+        audio_power = np.mean(cleaned ** 2)
+        noise_power = np.mean(nr ** 2)
+        if noise_power == 0:
+            continue
+        desired_noise_power = audio_power / (10 ** (snr_db / 10))
+        nr_scaled = nr * np.sqrt(desired_noise_power / noise_power)
+        cleaned = cleaned - nr_scaled
 
-    audio_td = audio - noise_ref_scaled
-    n_fft, hop = 2048, 512
-    stft = librosa.stft(audio_td, n_fft=n_fft, hop_length=hop)
+    stft = librosa.stft(cleaned, n_fft=_DENOISE_NFFT, hop_length=_DENOISE_HOP)
     magnitude, phase = np.abs(stft), np.angle(stft)
 
-    noise_stft = librosa.stft(noise_ref, n_fft=n_fft, hop_length=hop)
-    noise_threshold = np.mean(np.abs(noise_stft), axis=1, keepdims=True) * 1.2
-    gated_mag = np.where(magnitude > noise_threshold, magnitude, 0)
-    return librosa.istft(gated_mag * np.exp(1j * phase), hop_length=hop)
+    combined_threshold = np.zeros((magnitude.shape[0], 1), dtype=np.float32)
+    for th in noise_thresholds:
+        combined_threshold = np.maximum(combined_threshold, th)
+
+    gated_mag = np.where(magnitude > combined_threshold, magnitude, 0)
+    return librosa.istft(gated_mag * np.exp(1j * phase), hop_length=_DENOISE_HOP)
 
 
-def _analyze_file(filepath, analyzer, noise_clip, rain_clip):
+def _fast_predict(self, sample, sensitivity=1.0):
+    """Drop-in for birdnetlib Analyzer.predict that skips the redundant
+    resize_tensor_input + allocate_tensors on every chunk.
+
+    Every 3 s chunk has the identical shape (1, 144000), so re-allocating the
+    interpreter's tensors per chunk is pure overhead. We allocate only when the
+    batch shape actually changes. The invoke + flat_sigmoid are byte-for-byte
+    the same as upstream, so detections are unchanged.
+    """
+    data = np.asarray([sample], dtype=np.float32)
+    if getattr(self, "_cem_alloc_shape", None) != data.shape:
+        self.interpreter.resize_tensor_input(self.input_layer_index, list(data.shape))
+        self.interpreter.allocate_tensors()
+        self._cem_alloc_shape = data.shape
+    self.interpreter.set_tensor(self.input_layer_index, data)
+    self.interpreter.invoke()
+    prediction = self.interpreter.get_tensor(self.output_layer_index)
+    return self.flat_sigmoid(np.array(prediction), sensitivity=-sensitivity)
+
+
+def _analyze_file(filepath, analyzer, noise_clips, noise_thresholds):
     audio_raw, orig_sr = sf.read(filepath, dtype="float32")
     if audio_raw.ndim > 1:
         audio_raw = audio_raw.mean(axis=1)
     if orig_sr != cfg.TARGET_SR:
+        # BirdNET requires 48 kHz input (3 s chunk = 144000 samples), so this
+        # stays at TARGET_SR — do NOT lower it here.
         audio_raw = librosa.resample(y=audio_raw, orig_sr=orig_sr, target_sr=cfg.TARGET_SR)
 
-    audio_clean = _denoise(audio_raw, noise_clip)
-    audio_clean = _denoise(audio_clean, rain_clip)
+    audio_clean = _denoise_combined(audio_raw, noise_clips, noise_thresholds)
 
     recording = RecordingBuffer(
         analyzer, audio_clean, cfg.TARGET_SR,
@@ -129,10 +173,11 @@ def _analyze_file(filepath, analyzer, noise_clip, rain_clip):
 _worker_analyzer = None
 _worker_noise = None
 _worker_rain = None
+_worker_noise_thresholds = None
 
 
 def _init_worker(noise_path, rain_path, tflite_threads):
-    global _worker_analyzer, _worker_noise, _worker_rain
+    global _worker_analyzer, _worker_noise, _worker_rain, _worker_noise_thresholds
 
     with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
         _worker_analyzer = Analyzer()
@@ -151,6 +196,11 @@ def _init_worker(noise_path, rain_path, tflite_threads):
         except Exception:
             pass
 
+    # Skip resize_tensor_input+allocate_tensors on every 3s chunk (constant
+    # shape) — bind the fast predict as an instance method on this worker's
+    # analyzer only.
+    _worker_analyzer.predict = types.MethodType(_fast_predict, _worker_analyzer)
+
     _worker_noise, _ = sf.read(noise_path, dtype="float32")
     _worker_rain, _ = sf.read(rain_path, dtype="float32")
     if _worker_noise.ndim > 1:
@@ -165,6 +215,9 @@ def _init_worker(noise_path, rain_path, tflite_threads):
     if rain_sr != cfg.TARGET_SR:
         _worker_rain = librosa.resample(y=_worker_rain, orig_sr=rain_sr, target_sr=cfg.TARGET_SR)
 
+    # Precompute both gate thresholds once per worker instead of per file.
+    _worker_noise_thresholds = [_noise_threshold(_worker_noise), _noise_threshold(_worker_rain)]
+
 
 def _process_single_file(item):
     # item = (filepath, spot_override). spot_override is the spot a reference file
@@ -175,7 +228,10 @@ def _process_single_file(item):
     rec = build_record(filepath, spot=spot_override)
     filename = rec["filename"]
     try:
-        df = _analyze_file(filepath, _worker_analyzer, _worker_noise, _worker_rain)
+        df = _analyze_file(
+            filepath, _worker_analyzer,
+            [_worker_noise, _worker_rain], _worker_noise_thresholds,
+        )
         if not df.empty:
             df["filename"] = rec["filename"]
             df["filepath"] = rec["filepath"]
@@ -274,10 +330,14 @@ def write_output_csv(aggregate_path, output_path, input_directories, date_start,
         return
 
     if "filepath" in df.columns:
-        abs_dirs = [os.path.abspath(d) for d in input_directories]
-        in_dirs = df["filepath"].apply(
-            lambda fp: not pd.isna(fp) and any(os.path.abspath(str(fp)).startswith(d + os.sep) for d in abs_dirs)
-        )
+        # Vectorized prefix match instead of a per-row .apply(os.path.abspath):
+        # normalize the column once, then test against precomputed prefixes.
+        abs_dirs = [os.path.abspath(d) + os.sep for d in input_directories]
+        fp_norm = df["filepath"].astype(str).str.replace("/", os.sep, regex=False)
+        in_dirs = pd.Series(False, index=df.index)
+        for prefix in abs_dirs:
+            in_dirs |= fp_norm.str.startswith(prefix)
+        in_dirs &= df["filepath"].notna()
         # Reference files live OUTSIDE input_directories — keep them too so their
         # detections (with hour + spot) appear in the output CSV.
         in_refs = df["filename"].isin(reference_basenames) if "filename" in df.columns else False

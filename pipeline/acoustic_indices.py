@@ -16,10 +16,16 @@ Indices computed (Section 3.2.2):
 
 Performance optimizations (vs. original):
   - Hardware-adaptive parallelism via hw_profile (CPU cores, RAM)
-  - Combined denoise: single STFT pass for noise removal
-  - Faster resampling (kaiser_fast instead of kaiser_best)
+  - Single spectrogram per file: the denoise gate and the six indices now share
+    ONE STFT — no ISTFT reconstruction, no second (re-)spectrogram
+  - Segmentation done in frame-space (a slice of the one spectrogram), not by
+    re-transforming each 120s time-domain chunk
+  - Dedicated lower analysis sample rate (no index needs energy above 11 kHz)
+  - float32 spectrogram (scipy upcasts to float64 by default)
+  - Frequency-band masks + max-entropy cached per worker, not rebuilt per segment
+  - Faster resampling (soxr via librosa 0.11+ instead of kaiser_fast)
   - Vectorized CLS computation (eliminates per-column Python loop)
-  - Pre-computed noise STFT per worker
+  - Pre-computed noise threshold spectrum per worker
 """
 
 import os
@@ -32,7 +38,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import seaborn as sns
-from scipy.signal import spectrogram
+from scipy.signal import stft as scipy_stft
 from scipy.stats import entropy
 from datetime import date
 from tqdm import tqdm
@@ -42,7 +48,18 @@ import config as cfg
 from file_metadata import parse_filename, build_record
 from hw_profile import get_profile, print_profile
 
-_RESAMPLE_TYPE = "kaiser_fast"
+_RESAMPLE_TYPE = "soxr_hq"
+
+# Dedicated analysis rate for acoustic indices ONLY — never touches cfg.TARGET_SR
+# (birdnet_predictions.py needs 48 kHz; its model input is fixed at 144000
+# samples / 3s). Every index here uses frequencies up to 11 kHz (NDSI's bio
+# band), so a 24 kHz rate (12 kHz Nyquist) covers all bands while roughly
+# halving every STFT below. Override with the INDICES_SR env var if needed.
+INDICES_SR = int(os.environ.get("INDICES_SR", "24000").strip() or 24000)
+
+# Unified STFT params — used for BOTH the noise gate and the six indices, so
+# there is exactly one spectral transform per file (see _analyze_file).
+_STFT_NFFT, _STFT_HOP = 1024, 512
 
 
 # =============================================================================
@@ -91,25 +108,57 @@ def list_files(
 # PART 2 — MAIN PIPELINE
 # =============================================================================
 
-# ── Combined denoise (single STFT pass) ─────────────────────────────────────
+def _noise_threshold(noise_clip: np.ndarray, sr: int) -> np.ndarray:
+    """Per-frequency gate threshold (mean |STFT| * 1.2) for one noise clip.
 
-def _denoise_combined(audio: np.ndarray,
-                      noise_clips: list[np.ndarray],
-                      noise_stfts: list[np.ndarray] | None = None,
-                      sr: int | None = None,
-                      snr_db: float | None = None) -> np.ndarray:
-    """Remove noise sources in a single STFT pass."""
-    sr = cfg.TARGET_SR if sr is None else sr
+    Length-invariant (wrap-padding just repeats the clip to match audio
+    length), so computed ONCE per worker instead of per file.
+    """
+    _, _, Z = scipy_stft(noise_clip, fs=sr, nperseg=_STFT_NFFT, noverlap=_STFT_NFFT - _STFT_HOP)
+    return (np.mean(np.abs(Z), axis=1, keepdims=True) * 1.2).astype(np.float32)
+
+
+def _freq_band_masks(f: np.ndarray):
+    """Boolean band masks + max-entropy, cached by caller per (sr, n_fft)."""
+    anthro_mask = (f >= 1000) & (f <= 2000)
+    bio_mask = (f >= 2000) & (f <= 11000)
+    mid_mask = (f >= 2000) & (f <= 8000)
+    return anthro_mask, bio_mask, mid_mask
+
+
+_worker_freq_cache: dict = {}
+
+
+def _get_freq_context(f: np.ndarray):
+    """Cache masks/max-entropy keyed by spectrogram frequency-bin count.
+
+    f and n_freq_bins are identical for every segment of every file at a fixed
+    sr/n_fft, so this is computed once per worker instead of once per segment.
+    """
+    key = f.shape[0]
+    ctx = _worker_freq_cache.get(key)
+    if ctx is None:
+        anthro_mask, bio_mask, mid_mask = _freq_band_masks(f)
+        max_entropy = np.log(key) if key > 1 else 1.0
+        ctx = (anthro_mask, bio_mask, mid_mask, max_entropy)
+        _worker_freq_cache[key] = ctx
+    return ctx
+
+
+def _denoise_gate_spectrogram(audio: np.ndarray, noise_clips, noise_thresholds,
+                              sr: int, snr_db: float | None = None):
+    """Time-domain noise subtraction + ONE STFT, gated against the combined
+    noise threshold. Returns (f, gated_power_spectrogram) — no ISTFT, since
+    nothing downstream needs reconstructed audio.
+    """
     snr_db = cfg.SNR_DB if snr_db is None else snr_db
-    n_fft, hop = 2048, 512
 
-    cleaned = audio.copy()
+    cleaned = audio.astype(np.float32, copy=True)
     for noise_ref in noise_clips:
         if len(noise_ref) > len(cleaned):
             nr = noise_ref[:len(cleaned)]
         else:
             nr = np.pad(noise_ref, (0, len(cleaned) - len(noise_ref)), "wrap")
-
         audio_power = np.mean(cleaned ** 2)
         noise_power = np.mean(nr ** 2)
         if noise_power == 0:
@@ -118,41 +167,36 @@ def _denoise_combined(audio: np.ndarray,
         nr_scaled = nr * np.sqrt(desired_noise_power / noise_power)
         cleaned = cleaned - nr_scaled
 
-    stft = librosa.stft(cleaned, n_fft=n_fft, hop_length=hop)
-    magnitude, phase = np.abs(stft), np.angle(stft)
+    f, _, Z = scipy_stft(cleaned, fs=sr, nperseg=_STFT_NFFT, noverlap=_STFT_NFFT - _STFT_HOP)
+    magnitude = np.abs(Z).astype(np.float32)
 
     combined_threshold = np.zeros((magnitude.shape[0], 1), dtype=np.float32)
-    if noise_stfts:
-        for ns in noise_stfts:
-            threshold = np.mean(np.abs(ns), axis=1, keepdims=True) * 1.2
-            combined_threshold = np.maximum(combined_threshold, threshold)
-    else:
-        for noise_ref in noise_clips:
-            if len(noise_ref) > len(audio):
-                nr = noise_ref[:len(audio)]
-            else:
-                nr = np.pad(noise_ref, (0, len(audio) - len(noise_ref)), "wrap")
-            ns = librosa.stft(nr, n_fft=n_fft, hop_length=hop)
-            threshold = np.mean(np.abs(ns), axis=1, keepdims=True) * 1.2
-            combined_threshold = np.maximum(combined_threshold, threshold)
+    for th in noise_thresholds:
+        combined_threshold = np.maximum(combined_threshold, th)
 
-    gated_mag = np.where(magnitude > combined_threshold, magnitude, 0)
-    return librosa.istft(gated_mag * np.exp(1j * phase), hop_length=hop)
+    gated_mag = np.where(magnitude > combined_threshold, magnitude, 0).astype(np.float32)
+    # Square to keep the "power spectrogram" semantics the index formulas
+    # expect (a global scale factor cancels in every formula below, but the
+    # magnitude->power shape does not, so this must stay squared).
+    Sxx = gated_mag ** 2
+    return f, Sxx
 
 
-# ── Index computation (vectorized CLS) ──────────────────────────────────────
+# ── Index computation (vectorized CLS, shared-spectrogram) ─────────────────
 
-def compute_acoustic_indices(y: np.ndarray, sr: int):
-    """Compute ADI, ACI, AEI, NDSI, MFC, CLS from an audio segment."""
-    f, t, Sxx = spectrogram(y, fs=sr, nperseg=1024, noverlap=512)
-    Sxx += 1e-10
+def compute_acoustic_indices(Sxx: np.ndarray, freq_ctx) -> tuple:
+    """Compute ADI, ACI, AEI, NDSI, MFC, CLS from a (already gated) power
+    spectrogram slice. No spectral transform happens in this function — the
+    caller slices one full-file spectrogram per 120s segment.
+    """
+    anthro_mask, bio_mask, mid_mask, max_entropy = freq_ctx
+    Sxx = Sxx + np.float32(1e-10)
 
     # ADI: Shannon entropy of frequency band energy
     S_norm = Sxx / Sxx.sum(axis=0, keepdims=True)
     ADI = np.mean(entropy(S_norm, axis=0))
 
     # AEI: 1 - normalized ADI
-    max_entropy = np.log(Sxx.shape[0]) if Sxx.shape[0] > 1 else 1.0
     AEI = 1.0 - (ADI / max_entropy)
 
     # ACI: mean normalized absolute spectral difference
@@ -162,14 +206,11 @@ def compute_acoustic_indices(y: np.ndarray, sr: int):
     ACI = np.mean(diff.sum(axis=0) / col_sum)
 
     # NDSI: (biophony - anthrophony) / (biophony + anthrophony)
-    anthro_mask = (f >= 1000) & (f <= 2000)
-    bio_mask = (f >= 2000) & (f <= 11000)
     E_anthro = Sxx[anthro_mask, :].sum()
     E_bio = Sxx[bio_mask, :].sum()
     NDSI = (E_bio - E_anthro) / (E_bio + E_anthro + 1e-10)
 
     # MFC: mid-frequency cover (2-8 kHz > 20% of total)
-    mid_mask = (f >= 2000) & (f <= 8000)
     S_mid = Sxx[mid_mask, :].sum(axis=0)
     S_total = Sxx.sum(axis=0)
     MFC = np.mean(S_mid > 0.2 * S_total)
@@ -177,7 +218,6 @@ def compute_acoustic_indices(y: np.ndarray, sr: int):
     # CLS: cluster count — vectorized (no per-column Python loop)
     frame_maxes = Sxx.max(axis=0, keepdims=True) + 1e-10
     Sxx_norm = Sxx / frame_maxes
-    # A peak = local max above 0.5: value > left neighbor AND > right neighbor AND > 0.5
     above_thresh = Sxx_norm[1:-1, :] > 0.5
     gt_left = Sxx_norm[1:-1, :] > Sxx_norm[:-2, :]
     gt_right = Sxx_norm[1:-1, :] > Sxx_norm[2:, :]
@@ -187,30 +227,39 @@ def compute_acoustic_indices(y: np.ndarray, sr: int):
     return ADI, ACI, AEI, NDSI, MFC, CLS
 
 
-def _analyze_file(filepath, noise_clips, noise_stfts):
-    """Load, denoise, segment, compute indices for one WAV file."""
+def _analyze_file(filepath, noise_clips, noise_thresholds):
+    """Load, denoise+gate (one spectrogram), segment in frame-space, compute
+    indices for one WAV file.
+    """
     audio_raw, orig_sr = sf.read(filepath, dtype="float32")
     if audio_raw.ndim > 1:
         audio_raw = audio_raw.mean(axis=1)
-    if orig_sr != cfg.TARGET_SR:
+    if orig_sr != INDICES_SR:
         audio_raw = librosa.resample(y=audio_raw, orig_sr=orig_sr,
-                                     target_sr=cfg.TARGET_SR, res_type=_RESAMPLE_TYPE)
+                                     target_sr=INDICES_SR, res_type=_RESAMPLE_TYPE)
 
-    audio_clean = _denoise_combined(audio_raw, noise_clips, noise_stfts)
+    # Truncate to a whole multiple of the 120s segment length BEFORE the
+    # spectral transform, so the discarded tail costs nothing (previously the
+    # tail was denoised/transformed and then thrown away).
+    two_min_samples = int(120 * INDICES_SR)
+    n_segments = len(audio_raw) // two_min_samples
+    if n_segments == 0:
+        return []
+    audio_raw = audio_raw[: n_segments * two_min_samples]
 
-    sr = cfg.TARGET_SR
-    two_min = int(120 * sr)
-    segments = []
-    for start in range(0, len(audio_clean), two_min):
-        end = start + two_min
-        if end <= len(audio_clean):
-            segments.append(audio_clean[start:end])
-    if not segments and len(audio_clean) >= two_min:
-        segments.append(audio_clean[:two_min])
+    f, Sxx = _denoise_gate_spectrogram(audio_raw, noise_clips, noise_thresholds, INDICES_SR)
+    freq_ctx = _get_freq_context(f)
+
+    frames_per_seg = max(1, int(round(two_min_samples / _STFT_HOP)))
+    total_frames = Sxx.shape[1]
+    n_complete = total_frames // frames_per_seg
 
     results = []
-    for i, seg in enumerate(segments):
-        ADI, ACI, AEI, NDSI, MFC, CLS = compute_acoustic_indices(seg, sr)
+    for i in range(n_complete):
+        start = i * frames_per_seg
+        end = start + frames_per_seg
+        seg_Sxx = Sxx[:, start:end]
+        ADI, ACI, AEI, NDSI, MFC, CLS = compute_acoustic_indices(seg_Sxx, freq_ctx)
         results.append({
             "Segment": i + 1,
             "ADI": ADI, "ACI": ACI, "AEI": AEI,
@@ -222,22 +271,21 @@ def _analyze_file(filepath, noise_clips, noise_stfts):
 # ── Worker state ─────────────────────────────────────────────────────────────
 
 _worker_noise_clips = None
-_worker_noise_stfts = None
+_worker_noise_thresholds = None
 
 
 def _init_worker(noise_path):
-    global _worker_noise_clips, _worker_noise_stfts
-    n_fft, hop = 2048, 512
+    global _worker_noise_clips, _worker_noise_thresholds
 
     clip, clip_sr = sf.read(noise_path, dtype="float32")
     if clip.ndim > 1:
         clip = clip.mean(axis=1)
-    if clip_sr != cfg.TARGET_SR:
+    if clip_sr != INDICES_SR:
         clip = librosa.resample(y=clip, orig_sr=clip_sr,
-                                target_sr=cfg.TARGET_SR, res_type=_RESAMPLE_TYPE)
+                                target_sr=INDICES_SR, res_type=_RESAMPLE_TYPE)
 
     _worker_noise_clips = [clip]
-    _worker_noise_stfts = [librosa.stft(clip, n_fft=n_fft, hop_length=hop)]
+    _worker_noise_thresholds = [_noise_threshold(clip, INDICES_SR)]
 
 
 def _process_single_file(item):
@@ -245,7 +293,7 @@ def _process_single_file(item):
     rec = build_record(filepath, spot=spot_override)
     filename = rec["filename"]
     try:
-        seg_results = _analyze_file(filepath, _worker_noise_clips, _worker_noise_stfts)
+        seg_results = _analyze_file(filepath, _worker_noise_clips, _worker_noise_thresholds)
         if seg_results:
             for r in seg_results:
                 r["filename"] = rec["filename"]
@@ -284,6 +332,7 @@ def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides
 
     n_workers = profile["indices_workers"]
     print(f"Parallelism: {n_workers} workers ({profile['cpus']} CPUs, {profile['ram_gb']} GB RAM)")
+    print(f"Analysis rate: {INDICES_SR} Hz (indices only; independent of BirdNET's 48 kHz)")
 
     all_results = []
     processed_this_run = set()
@@ -340,12 +389,13 @@ def write_output_and_plots(aggregate_path, output_dir, input_directories,
         return
 
     if "filepath" in df.columns:
-        abs_dirs = [os.path.abspath(d) for d in input_directories]
-        in_dirs = df["filepath"].apply(
-            lambda fp: not pd.isna(fp) and any(
-                os.path.abspath(str(fp)).startswith(d + os.sep) for d in abs_dirs
-            )
-        )
+        # Vectorized prefix match instead of a per-row .apply(os.path.abspath).
+        abs_dirs = [os.path.abspath(d) + os.sep for d in input_directories]
+        fp_norm = df["filepath"].astype(str).str.replace("/", os.sep, regex=False)
+        in_dirs = pd.Series(False, index=df.index)
+        for prefix in abs_dirs:
+            in_dirs |= fp_norm.str.startswith(prefix)
+        in_dirs &= df["filepath"].notna()
         df = df[in_dirs]
 
     if "date" in df.columns:
@@ -374,14 +424,17 @@ def write_output_and_plots(aggregate_path, output_dir, input_directories,
     df["hour"] = pd.to_numeric(df["hour"]).astype(int)
 
     print("Generating box plots...")
-    spots = sorted(df["Spot"].unique())
+    # Group once per (index, spot) instead of re-filtering df[df.Spot==spot]
+    # inside the innermost loop for every index.
+    spot_groups = dict(tuple(df.groupby("Spot")))
+    spots = sorted(spot_groups.keys())
     for index_name in INDICES_TO_PLOT:
         if index_name not in df.columns:
             print(f"  WARNING: {index_name} not in data, skipping.")
             continue
 
         for spot in spots:
-            sdf = df[df["Spot"] == spot]
+            sdf = spot_groups[spot]
             if sdf.empty:
                 continue
 
