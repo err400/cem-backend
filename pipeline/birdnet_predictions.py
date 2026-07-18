@@ -390,6 +390,26 @@ def main():
         if sp:
             spot_overrides[base] = sp
 
+    # Map directory-based spot label (aligned INPUT_DIRECTORIES/DATASET_SPOTS) onto
+    # every file discovered under that directory. Without this, the "spot" column
+    # falls back to whatever parse_filename extracts from the filename's own
+    # device-ID prefix (e.g. "04213SPOT1"), which can differ from the spot name a
+    # user chose in the UI — acoustic_indices.py already does this; birdnet was
+    # missing it, so its aggregate's spot values were inconsistent with every
+    # other script's.
+    if cfg.DATASET_SPOTS:
+        ds_aligned = list(cfg.DATASET_SPOTS) + [""] * max(0, len(cfg.INPUT_DIRECTORIES) - len(cfg.DATASET_SPOTS))
+        for d, s in zip(cfg.INPUT_DIRECTORIES, ds_aligned):
+            if s:
+                for filepath in files_to_process:
+                    base = os.path.basename(filepath)
+                    if base in spot_overrides:
+                        continue
+                    parent = os.path.dirname(os.path.abspath(filepath))
+                    dir_path = os.path.abspath(d)
+                    if parent == dir_path or parent.startswith(dir_path + os.sep):
+                        spot_overrides[base] = s
+
     run_pipeline(
         file_list=files_to_process,
         aggregate_path=cfg.AGGREGATE_FILE,
