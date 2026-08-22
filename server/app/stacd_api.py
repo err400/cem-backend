@@ -5,6 +5,9 @@ CEM Server API -- clean 3-group design.
   2. Scripts -- single synchronous algorithm endpoint (script name in body).
   3. Polling & download -- job status, results, files.
 """
+import csv
+from datetime import datetime
+import json
 import os
 
 import zipfile
@@ -83,6 +86,114 @@ def _save_upload(dest: Path, upload: UploadFile) -> int:
     return written
 
 
+def _successful_server_jobs(proj: projectstore.Project) -> list[dict]:
+    """Completed jobs physically present in this server's DATA_DIR project tree.
+
+    Browser/local-watcher jobs never create server job.json records here, so
+    requiring a successful server-side task is the backend guard that keeps
+    local-only analysis from being published.
+    """
+    out: list[dict] = []
+    if not proj.root.is_dir():
+        return out
+    for script_dir in sorted(proj.root.iterdir()):
+        if (
+            not script_dir.is_dir()
+            or script_dir.name in {"dataset", ".git", "__pycache__"}
+            or script_dir.name.startswith(".")
+            or (script_dir / "audio").is_dir()
+        ):
+            continue
+        for job_dir in sorted(script_dir.iterdir()):
+            meta_path = job_dir / "job.json"
+            if not (job_dir.is_dir() and meta_path.is_file()):
+                continue
+            try:
+                meta_d = json.loads(meta_path.read_text())
+            except Exception:
+                continue
+            tasks = meta_d.get("tasks") or []
+            if any(str(t.get("status") or "").lower() == "success" for t in tasks):
+                out.append({
+                    "job_id": job_dir.name,
+                    "script": script_dir.name,
+                    "path": str(job_dir),
+                    "task_count": len(tasks),
+                })
+    return out
+
+
+def _format_job_date(value) -> str | None:
+    if not value:
+        return None
+    raw = str(value)
+    for fmt in ("%Y%m%d", "%Y-%m-%d"):
+        try:
+            return datetime.strptime(raw, fmt).date().isoformat()
+        except ValueError:
+            pass
+    return None
+
+
+def _repair_missing_aggregate_dates(proj: projectstore.Project) -> bool:
+    """Fill missing aggregate date/hour for server-compute files with odd names.
+
+    Song Meter filenames carry date/time. Browser-uploaded files like
+    recording.wav do not, so BirdNET can produce valid detections with blank
+    date/hour. The master indexer requires dates; use the BirdNET job's selected
+    start_date as the conservative fallback.
+    """
+    if not proj.aggregate_path.is_file():
+        return False
+
+    fallback_date = None
+    for job in _successful_server_jobs(proj):
+        if job.get("script") != "birdnet":
+            continue
+        meta_path = Path(job["path"]) / "job.json"
+        try:
+            meta_d = json.loads(meta_path.read_text())
+        except Exception:
+            continue
+        for task in reversed(meta_d.get("tasks") or []):
+            fallback_date = _format_job_date((task.get("params") or {}).get("start_date"))
+            if fallback_date:
+                break
+        if fallback_date:
+            break
+
+    if not fallback_date:
+        return False
+
+    with open(proj.aggregate_path, newline="") as src:
+        reader = csv.DictReader(src)
+        rows = list(reader)
+        fieldnames = reader.fieldnames or []
+
+    if not rows or "date" not in fieldnames or "hour" not in fieldnames:
+        return False
+
+    changed = False
+    for row in rows:
+        if not (row.get("date") or "").strip():
+            row["date"] = fallback_date
+            changed = True
+        if not (row.get("hour") or "").strip():
+            row["hour"] = "0"
+            changed = True
+
+    if not changed:
+        return False
+
+    tmp = proj.aggregate_path.with_suffix(".csv.tmp")
+    with open(tmp, "w", newline="") as dest:
+        writer = csv.DictWriter(dest, fieldnames=fieldnames)
+        writer.writeheader()
+        writer.writerows(rows)
+    tmp.replace(proj.aggregate_path)
+    return True
+
+
 # =========================================================================== #
 #  GROUP 1 -- Upload
 # =========================================================================== #
@@ -92,7 +203,14 @@ def project_status(project: str = Query(..., description="Project folder name"))
     project = _component(project, "project")
     proj = projectstore.get_project(project)
     if proj is None:
-        raise HTTPException(404, f"Project '{project}' not found.")
+        return {
+            "project": project,
+            "exists": False,
+            "visibility": "private",
+            "is_public": False,
+            "retention_hours": projectstore.PRIVATE_RETENTION_HOURS,
+            "missing_on_server": True,
+        }
     return proj.status()
 
 
@@ -187,6 +305,123 @@ def project_upload_processed(
     _save_upload(proj.processed_path, file)
     proj._touch()
     return {"status": "ok", "project": project, "has_processed": True}
+
+
+@router.post("/projects/publish")
+def publish_project(body: dict = Body(...), user: dict = Depends(_user)):
+    project = body.get("project")
+    if not project:
+        raise HTTPException(400, "project is required.")
+    project = _component(project, "project")
+
+    proj = projectstore.get_project(project)
+    if proj is None:
+        raise HTTPException(
+            404,
+            f"Project '{project}' has no server-side compute data. "
+            "Run analysis in server mode before publishing.",
+        )
+
+    successful_jobs = _successful_server_jobs(proj)
+    if not successful_jobs:
+        raise HTTPException(
+            409,
+            "Project cannot be made public because no completed server-compute "
+            "job exists for it. Local watcher jobs are not publishable.",
+        )
+
+    birdnet_jobs = [job for job in successful_jobs if job.get("script") == meta.BIRDNET]
+    if not birdnet_jobs:
+        raise HTTPException(
+            409,
+            "Project cannot be made public because no completed BirdNET "
+            "server-compute job exists for it.",
+        )
+
+    if not proj.has_aggregate():
+        raise HTTPException(
+            409,
+            "Project cannot be made public because server compute has not "
+            "produced dataset/aggregate.csv yet. Run BirdNET/server analysis first.",
+        )
+
+    dry_run = bool(body.get("dry_run", False))
+    repaired_aggregate_dates = False if dry_run else _repair_missing_aggregate_dates(proj)
+    if dry_run:
+        return {
+            "status": "dry_run",
+            "project": project,
+            "server_jobs": successful_jobs,
+            "repaired_aggregate_dates": repaired_aggregate_dates,
+            "data_dir_visibility_updated": False,
+        }
+
+    meta_d = proj.mark_public(
+        server_jobs=successful_jobs,
+        repaired_aggregate_dates=repaired_aggregate_dates,
+    )
+
+    activity_log.append(
+        user,
+        "publish_project",
+        project=project,
+        server_jobs=len(successful_jobs),
+        public_project_path=str(proj.root),
+    )
+
+    return {
+        "status": "published",
+        "project": project,
+        "server_jobs": successful_jobs,
+        "repaired_aggregate_dates": repaired_aggregate_dates,
+        "data_dir_visibility_updated": True,
+        "public_project_path": str(proj.root),
+        "visibility": meta_d.get("visibility"),
+        "retention_hours": meta_d.get("retention_hours"),
+        "indexer": {
+            "mode": "polling",
+            "message": "CEM Master indexer will pick up this public project from DATA_DIR.",
+        },
+    }
+
+
+@router.post("/projects/unpublish")
+def unpublish_project(body: dict = Body(...), user: dict = Depends(_user)):
+    project = body.get("project")
+    if not project:
+        raise HTTPException(400, "project is required.")
+    project = _component(project, "project")
+
+    proj = projectstore.get_project(project)
+    if proj is None:
+        activity_log.append(user, "unpublish_missing_project", project=project)
+        return {
+            "status": "private",
+            "project": project,
+            "data_dir_visibility_updated": False,
+            "visibility": "private",
+            "retention_hours": projectstore.PRIVATE_RETENTION_HOURS,
+            "missing_on_server": True,
+            "indexer": {
+                "mode": "polling",
+                "message": "Project is absent from DATA_DIR, so it is not public.",
+            },
+        }
+
+    meta_d = proj.mark_private()
+    activity_log.append(user, "unpublish_project", project=project)
+
+    return {
+        "status": "private",
+        "project": project,
+        "data_dir_visibility_updated": True,
+        "visibility": meta_d.get("visibility"),
+        "retention_hours": meta_d.get("retention_hours"),
+        "indexer": {
+            "mode": "polling",
+            "message": "CEM Master indexer will prune this private project from the public catalog.",
+        },
+    }
 
 
 # =========================================================================== #
@@ -331,8 +566,27 @@ def _run_script(script_name: str, body: dict):
     if not client_job_id:
         raise HTTPException(400, "job_id is required (minted by the client).")
     client_job_id = _component(client_job_id, "job_id")
+
+    if script_name in meta.WAV_SCRIPTS and not proj.in_range_audio(
+        spots, start_date=start_date, end_date=end_date
+    ):
+        raise HTTPException(
+            409,
+            "No audio files are uploaded on the server for the selected project, "
+            "spots, and date range. Import/link WAV files and make sure the "
+            "analysis date range includes their filename date.",
+        )
+
     job = jobstore.create_job(project, script_name, job_id=client_job_id)
     stats = proj.populate_job(job, spots=spots, start_date=start_date, end_date=end_date)
+
+    if script_name in meta.WAV_SCRIPTS and stats["audio_linked"] == 0:
+        raise HTTPException(
+            409,
+            "No audio files are uploaded on the server for the selected project, "
+            "spots, and date range. Import/link WAV files and make sure the "
+            "analysis date range includes their filename date.",
+        )
 
     if spots_geo:
         job.set_geo(spots_geo)

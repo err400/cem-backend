@@ -72,8 +72,8 @@ def _request(method: str, rel: str, retry_on_401: bool = True) -> dict | None:
 
 
 def create_share(path: str) -> dict | None:
-    """Create a public share link for *path* (relative to DATA_DIR, which is
-    the FileBrowser root). Returns the share record (hash, path, expire,
+    """Create a public share link for *path* (relative to the DATA_DIR-backed
+    FileBrowser root). Returns the share record (hash, path, expire,
     hasPassword) or None if FileBrowser is not configured."""
     if not is_configured():
         return None

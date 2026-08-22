@@ -226,6 +226,11 @@ def _process_single_file(item):
     filepath, spot_override = item
     # Unified metadata: filename parse + attached-spot override in one place.
     rec = build_record(filepath, spot=spot_override)
+    if rec.get("date") is None and cfg.DATE_START is not None:
+        rec["date"] = cfg.DATE_START.isoformat()
+        rec["hour"] = 0
+        rec["minute"] = 0
+        rec["second"] = 0
     filename = rec["filename"]
     try:
         df = _analyze_file(
