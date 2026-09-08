@@ -58,8 +58,7 @@ RUN pip install --upgrade pip \
     && pip install --retries 8 --timeout 180 -r /tmp/requirements-pipeline.txt \
     && if [ -n "$TF_PACKAGE" ]; then pip install --retries 8 --timeout 180 "$TF_PACKAGE"; fi \
     && if [ -n "$BN_EXTRA" ]; then pip install --retries 8 --timeout 180 "birdnet${BN_EXTRA}"; fi \
-    && pip install --retries 8 --timeout 180 -r requirements-server.txt \
-    && pip install --retries 8 --timeout 180 "protobuf<5"
+    && pip install --retries 8 --timeout 180 -r requirements-server.txt
 
 # --- Application code ---
 # Pipeline scripts are NOT baked in -- mount them at /app/pipeline (or set
