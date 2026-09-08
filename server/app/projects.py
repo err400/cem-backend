@@ -16,7 +16,9 @@ import json
 import os
 import re
 import shutil
+import hashlib
 import threading
+import wave
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Optional
@@ -50,6 +52,10 @@ class Project:
     @property
     def aggregate_path(self) -> Path:
         return self.dataset_dir / "aggregate.csv"
+
+    @property
+    def audio_manifest_path(self) -> Path:
+        return self.dataset_dir / "audio_manifest.json"
 
     @property
     def processed_path(self) -> Path:
@@ -224,6 +230,62 @@ class Project:
     def audio_count(self, spot: Optional[str] = None) -> int:
         return len(self.list_audio_files(spot))
 
+    def audio_id(self, spot: str, filename: str) -> str:
+        payload = "\0".join([self.name, safe_component(spot, "spot"), Path(filename).name])
+        return "aud_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+    @staticmethod
+    def _wav_metadata(path: Path) -> dict:
+        if path.suffix.lower() != ".wav":
+            return {}
+        try:
+            with wave.open(str(path), "rb") as audio:
+                frames = audio.getnframes()
+                rate = audio.getframerate()
+                return {
+                    "duration_seconds": round(frames / rate, 3) if rate else None,
+                    "sample_rate": rate,
+                }
+        except (OSError, EOFError, wave.Error):
+            return {}
+
+    def audio_record(self, spot: str, filename: str) -> dict:
+        spot = safe_component(spot, "spot")
+        filename = Path(filename).name
+        path = self.spot_audio_dir(spot) / filename
+        rel = path.relative_to(get_settings().DATA_DIR).as_posix()
+        record = {
+            "audio_id": self.audio_id(spot, filename),
+            "project": self.name,
+            "spot": spot,
+            "filename": filename,
+            "relative_path": rel,
+        }
+        if path.is_file():
+            stat = path.stat()
+            record.update({
+                "size_bytes": stat.st_size,
+                "modified_at": datetime.fromtimestamp(stat.st_mtime, tz=timezone.utc).isoformat(),
+            })
+            record.update(self._wav_metadata(path))
+        return record
+
+    def list_audio_records(self, spot: Optional[str] = None) -> list[dict]:
+        records = []
+        spots = [safe_component(spot, "spot")] if spot else self.list_spots()
+        for s in spots:
+            for filename in self.list_audio_files(s):
+                records.append(self.audio_record(s, filename))
+        return sorted(records, key=lambda r: (r["spot"], r["filename"]))
+
+    def write_audio_manifest(self) -> list[dict]:
+        records = self.list_audio_records()
+        self.dataset_dir.mkdir(parents=True, exist_ok=True)
+        tmp = self.audio_manifest_path.with_suffix(".json.tmp")
+        tmp.write_text(json.dumps({"items": records}, indent=2))
+        tmp.replace(self.audio_manifest_path)
+        return records
+
     def in_range_audio(
         self,
         spots: list[str],
@@ -288,6 +350,7 @@ class Project:
             spots_info[s] = {
                 "audio_count": self.audio_count(s),
                 "audio_files": self.list_audio_files(s),
+                "audio_records": self.list_audio_records(s),
             }
         return {
             "project": self.name,
@@ -295,6 +358,7 @@ class Project:
             "total_audio": self.audio_count(),
             "has_aggregate": self.has_aggregate(),
             "has_processed": self.has_processed(),
+            "has_audio_manifest": self.audio_manifest_path.is_file(),
             "aggregate_modified": self.aggregate_modified(),
             "processed_modified": self.processed_modified(),
             "visibility": meta.get("visibility") or "private",
@@ -372,6 +436,7 @@ class Project:
             shutil.copy2(job.work_aggregate, self.aggregate_path)
         if self.has_aggregate() and job.processed_file.is_file() and job.processed_file.stat().st_size > 0:
             shutil.copy2(job.processed_file, self.processed_path)
+        self.write_audio_manifest()
         self._touch()
 
 

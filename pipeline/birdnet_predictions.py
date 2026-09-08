@@ -10,6 +10,7 @@ Three-part pipeline:
 import os
 import re
 import json
+import hashlib
 from pathlib import Path
 import numpy as np
 import pandas as pd
@@ -326,6 +327,71 @@ def _write_project_iucn_cache(aggregate_path: str, cache: dict[str, str]) -> Non
     cache_path.write_text(json.dumps(cache, indent=2, sort_keys=True))
 
 
+def make_audio_id(project: str, spot: str, filename: str) -> str:
+    payload = "\0".join([str(project).strip(), str(spot).strip(), os.path.basename(str(filename))])
+    return "aud_" + hashlib.sha256(payload.encode("utf-8")).hexdigest()[:24]
+
+
+def attach_audio_ids(df: pd.DataFrame, aggregate_path: str) -> pd.DataFrame:
+    if df.empty or "filename" not in df.columns or "spot" not in df.columns:
+        return df
+    result = df.copy()
+    project = _project_root_for_aggregate(aggregate_path).name
+    generated = result.apply(
+        lambda row: make_audio_id(project, row.get("spot", ""), row.get("filename", "")),
+        axis=1,
+    )
+    if "audio_id" not in result.columns:
+        result["audio_id"] = generated
+    else:
+        missing = result["audio_id"].isna() | (result["audio_id"].astype(str).str.strip() == "")
+        result.loc[missing, "audio_id"] = generated[missing]
+    return result
+
+
+def ensure_aggregate_audio_ids(
+    aggregate_path: str,
+    required_columns: list[str] | None = None,
+) -> list[str] | None:
+    if not os.path.isfile(aggregate_path) or os.path.getsize(aggregate_path) == 0:
+        return None
+    try:
+        existing = pd.read_csv(aggregate_path)
+    except Exception:
+        return None
+    if existing.empty or "filename" not in existing.columns or "spot" not in existing.columns:
+        columns = list(existing.columns)
+        for col in required_columns or []:
+            if col not in columns:
+                columns.append(col)
+        if columns != list(existing.columns):
+            existing.reindex(columns=columns).to_csv(aggregate_path, index=False)
+            print(f"Backfilled aggregate metadata columns: {aggregate_path}")
+        return columns
+
+    changed = False
+    needs_audio_id = "audio_id" not in existing.columns
+    if not needs_audio_id:
+        needs_audio_id = bool(
+            (existing["audio_id"].isna() | (existing["audio_id"].astype(str).str.strip() == "")).any()
+        )
+    if needs_audio_id:
+        existing = attach_audio_ids(existing, aggregate_path)
+        changed = True
+
+    columns = list(existing.columns)
+    for col in required_columns or []:
+        if col not in columns:
+            columns.append(col)
+            changed = True
+
+    if changed:
+        existing = existing.reindex(columns=columns)
+        existing.to_csv(aggregate_path, index=False)
+        print(f"Backfilled aggregate metadata columns: {aggregate_path}")
+    return list(existing.columns)
+
+
 def enrich_iucn_category(df: pd.DataFrame, aggregate_path: str) -> pd.DataFrame:
     if df.empty:
         return df
@@ -397,7 +463,13 @@ def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides
     new_df = pd.DataFrame()
     if all_detections:
         new_df = pd.concat(all_detections, ignore_index=True)
+        new_df = attach_audio_ids(new_df, aggregate_path)
         new_df = enrich_iucn_category(new_df, aggregate_path)
+        existing_columns = ensure_aggregate_audio_ids(aggregate_path, list(new_df.columns))
+        if existing_columns:
+            columns = list(existing_columns)
+            columns.extend([col for col in new_df.columns if col not in columns])
+            new_df = new_df.reindex(columns=columns)
         header = not os.path.isfile(aggregate_path)
         new_df.to_csv(aggregate_path, mode="a", header=header, index=False)
         print(f"Appended {len(new_df)} detections to {aggregate_path}")

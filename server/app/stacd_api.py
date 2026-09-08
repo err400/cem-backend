@@ -214,6 +214,25 @@ def project_status(project: str = Query(..., description="Project folder name"))
     return proj.status()
 
 
+@router.get("/projects/audio")
+def project_audio(
+    project: str = Query(..., description="Project folder name"),
+    spot: str | None = Query(default=None, description="Optional spot folder name"),
+):
+    project = _component(project, "project")
+    spot = _component(spot, "spot") if spot else None
+    proj = projectstore.get_project(project)
+    if proj is None:
+        raise HTTPException(404, f"Project '{project}' not found.")
+    items = proj.list_audio_records(spot)
+    return {
+        "project": project,
+        "spot": spot,
+        "items": items,
+        "total": len(items),
+    }
+
+
 @router.post("/projects/check-files")
 def check_files(body: dict = Body(...)):
     project = body.get("project")
@@ -254,16 +273,20 @@ def project_upload_audio(
     audio_dir.mkdir(parents=True, exist_ok=True)
     existing = set(p.name for p in audio_dir.iterdir() if p.is_file())
 
-    saved, skipped = [], []
+    saved, skipped, skipped_records = [], [], []
     for up in files:
         fname = _safe_name(up.filename)
         if fname in existing:
             skipped.append(fname)
+            skipped_records.append(proj.audio_record(spot, fname))
             continue
         size = _save_upload(audio_dir / fname, up)
-        saved.append({"filename": fname, "size_bytes": size})
+        record = proj.audio_record(spot, fname)
+        record["size_bytes"] = size
+        saved.append(record)
         existing.add(fname)
 
+    audio_manifest = proj.write_audio_manifest()
     proj._touch()
     activity_log.append(
         user, "upload_audio",
@@ -276,6 +299,8 @@ def project_upload_audio(
         "spot": spot,
         "uploaded": saved,
         "skipped": skipped,
+        "skipped_records": skipped_records,
+        "audio_manifest_count": len(audio_manifest),
         "spot_audio_count": proj.audio_count(spot),
         "total_audio": proj.audio_count(),
     }
@@ -356,6 +381,7 @@ def publish_project(body: dict = Body(...), user: dict = Depends(_user)):
             "data_dir_visibility_updated": False,
         }
 
+    proj.write_audio_manifest()
     meta_d = proj.mark_public(
         server_jobs=successful_jobs,
         repaired_aggregate_dates=repaired_aggregate_dates,
