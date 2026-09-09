@@ -233,6 +233,45 @@ def project_audio(
     }
 
 
+@router.get("/projects/snippets")
+def project_snippets(
+    project: str = Query(..., description="Project folder name"),
+):
+    project = _component(project, "project")
+    proj = projectstore.get_project(project)
+    if proj is None:
+        raise HTTPException(404, f"Project '{project}' not found.")
+    index_path = proj.snippets_index_path
+    if not index_path.is_file():
+        return {
+            "project": project,
+            "total_species_snippets": 0,
+            "species": {},
+        }
+    try:
+        return json.loads(index_path.read_text())
+    except Exception as e:
+        raise HTTPException(500, f"Failed to read snippets metadata: {e}")
+
+
+@router.get("/projects/snippets/audio")
+def get_snippet_audio(
+    project: str = Query(..., description="Project folder name"),
+    filename: str = Query(..., description="Snippet audio filename"),
+):
+    project = _component(project, "project")
+    fname = _safe_name(filename)
+    proj = projectstore.get_project(project)
+    if proj is None:
+        raise HTTPException(404, f"Project '{project}' not found.")
+    target = (proj.snippets_dir / fname).resolve()
+    if not str(target).startswith(str(proj.snippets_dir.resolve()) + os.sep):
+        raise HTTPException(400, "Path escapes snippets directory.")
+    if not target.is_file():
+        raise HTTPException(404, f"Snippet file '{filename}' not found.")
+    return FileResponse(target, media_type="audio/wav", filename=target.name)
+
+
 @router.post("/projects/check-files")
 def check_files(body: dict = Body(...)):
     project = body.get("project")

@@ -36,6 +36,7 @@ from birdnetlib.analyzer import Analyzer
 
 import config as cfg
 from file_metadata import parse_filename, build_record  # unified, source-agnostic
+from snippet_extractor import extract_species_snippets
 
 
 # =============================================================================
@@ -473,6 +474,12 @@ def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides
         header = not os.path.isfile(aggregate_path)
         new_df.to_csv(aggregate_path, mode="a", header=header, index=False)
         print(f"Appended {len(new_df)} detections to {aggregate_path}")
+
+        # Extract top-confidence 9-second snippets for detected species
+        try:
+            extract_species_snippets(aggregate_path)
+        except Exception as e:
+            print(f"Warning: Failed to extract species audio snippets: {e}")
     else:
         print("No detections in this batch.")
 

@@ -61,6 +61,14 @@ class Project:
     def processed_path(self) -> Path:
         return self.dataset_dir / "processed_files.txt"
 
+    @property
+    def snippets_dir(self) -> Path:
+        return self.root / "snippets"
+
+    @property
+    def snippets_index_path(self) -> Path:
+        return self.snippets_dir / "species_snippets.json"
+
     def spot_audio_dir(self, spot: str) -> Path:
         return ensure_within(self.root, self.root / safe_component(spot, "spot") / "audio")
 
