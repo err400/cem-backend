@@ -36,7 +36,8 @@ from birdnetlib.analyzer import Analyzer
 
 import config as cfg
 from file_metadata import parse_filename, build_record  # unified, source-agnostic
-from snippet_extractor import extract_species_snippets
+from snippet_extractor import refresh_species_snippets
+from debug_log import debug
 
 
 # =============================================================================
@@ -423,9 +424,11 @@ def enrich_iucn_category(df: pd.DataFrame, aggregate_path: str) -> pd.DataFrame:
 
 
 def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides=None):
+    debug("birdnet.start", files=len(file_list), aggregate=aggregate_path)
     spot_overrides = spot_overrides or {}   # {basename: spot_name}
     if not file_list:
         print("No new files to process.")
+        refresh_species_snippets(aggregate_path)
         return pd.DataFrame()
 
     total_cpus = multiprocessing.cpu_count()
@@ -440,6 +443,7 @@ def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides
     else:
         n_workers = max(1, min(total_cpus // 2, 2))
     threads_per = max(1, total_cpus // n_workers)
+    debug("birdnet.workers", workers=n_workers, threads_per_worker=threads_per)
     print(f"Parallelism: {n_workers} workers × {threads_per} TFLite threads ({total_cpus} CPUs)")
 
     all_detections = []
@@ -456,6 +460,7 @@ def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides
         with tqdm(total=len(file_list), desc="BirdNET") as pbar:
             for future in as_completed(futures):
                 filename, result = future.result()
+                debug("birdnet.file_finished", filename=filename, detections=0 if result is None else len(result))
                 processed_this_run.add(filename)
                 if result is not None:
                     all_detections.append(result)
@@ -475,14 +480,11 @@ def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides
         new_df.to_csv(aggregate_path, mode="a", header=header, index=False)
         print(f"Appended {len(new_df)} detections to {aggregate_path}")
 
-        # Extract top-confidence 9-second snippets for detected species
-        try:
-            extract_species_snippets(aggregate_path)
-        except Exception as e:
-            print(f"Warning: Failed to extract species audio snippets: {e}")
     else:
         print("No detections in this batch.")
 
+    refresh_species_snippets(aggregate_path)
+    debug("birdnet.finish", new_detections=len(new_df), processed=len(processed_this_run))
     already_processed.update(processed_this_run)
     save_processed_files(processed_files_path, already_processed)
     print(f"Marked {len(processed_this_run)} files as processed (total: {len(already_processed)})")

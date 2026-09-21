@@ -29,6 +29,7 @@ from . import runner
 from . import stac
 from .safepath import UnsafeComponent, safe_component
 from .settings import get_settings
+from .debug import debug
 
 router = APIRouter(prefix="/api/v1", tags=["cem"])
 
@@ -83,6 +84,7 @@ def _save_upload(dest: Path, upload: UploadFile) -> int:
                 dest.unlink(missing_ok=True)
                 raise HTTPException(413, f"Upload exceeds {s.MAX_UPLOAD_MB} MB limit.")
             out.write(chunk)
+    debug("upload.saved", filename=dest.name, bytes=written)
     return written
 
 
@@ -243,13 +245,16 @@ def project_snippets(
         raise HTTPException(404, f"Project '{project}' not found.")
     index_path = proj.snippets_index_path
     if not index_path.is_file():
+        debug("snippets.missing_index", project=project, reason="Run BirdNET or backfill existing detections")
         return {
             "project": project,
             "total_species_snippets": 0,
             "species": {},
         }
     try:
-        return json.loads(index_path.read_text())
+        payload = json.loads(index_path.read_text())
+        debug("snippets.metadata", project=project, count=len(payload.get("species", {})))
+        return payload
     except Exception as e:
         raise HTTPException(500, f"Failed to read snippets metadata: {e}")
 
@@ -269,6 +274,7 @@ def get_snippet_audio(
         raise HTTPException(400, "Path escapes snippets directory.")
     if not target.is_file():
         raise HTTPException(404, f"Snippet file '{filename}' not found.")
+    debug("snippets.stream", project=project, filename=target.name, bytes=target.stat().st_size)
     return FileResponse(target, media_type="audio/wav", filename=target.name)
 
 
