@@ -8,6 +8,7 @@ services:
     ports:
       - "${COMPUTE_BACKEND_PORT:-8002}:8000"
     environment:
+      DEBUG: ${DEBUG:-false}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2048}
       LOG_DIR: ${LOG_DIR:-/logs}
       ALLOWED_ORIGINS: ${ALLOWED_ORIGINS:-*}
@@ -63,6 +64,7 @@ services:
     ports:
       - "${COMPUTE_FRONTEND_PORT:-8080}:80"
     environment:
+      DEBUG: ${DEBUG:-false}
       # Baked into js/core/Config.js when the container starts. This is the
       # address the BROWSER uses, so it is localhost and the host-published
       # port -- not the compose service name, which means nothing outside the

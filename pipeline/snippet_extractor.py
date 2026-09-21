@@ -15,6 +15,7 @@ import json
 import wave
 from pathlib import Path
 import pandas as pd
+from debug_log import debug
 
 # Optional soundfile import for non-PCM formats
 try:
@@ -70,6 +71,7 @@ def extract_clip(
         raise FileNotFoundError(f"Source audio file not found: {source_filepath}")
 
     sr, total_duration = get_audio_info(source_filepath)
+    debug("snippet.source", source=source_filepath, sample_rate=sr, duration=total_duration)
 
     # Calculate desired window centered on detection
     desired_start = max(0.0, detection_start - context_seconds)
@@ -86,6 +88,7 @@ def extract_clip(
     start_frame = int(round(desired_start * sr))
     stop_frame = int(round(desired_end * sr))
     num_to_read = max(0, stop_frame - start_frame)
+    debug("snippet.window", start=desired_start, end=desired_end, frames=num_to_read)
 
     os.makedirs(os.path.dirname(output_filepath), exist_ok=True)
 
@@ -108,6 +111,7 @@ def extract_clip(
         return desired_start, desired_end, actual_duration
     except Exception as e:
         # Fallback to soundfile if wave module failed on non-standard WAV headers
+        debug("snippet.decoder_fallback", error=type(e).__name__, soundfile=_HAS_SOUNDFILE)
         if _HAS_SOUNDFILE:
             data, read_sr = sf.read(source_filepath, start=start_frame, stop=stop_frame, dtype="float32")
             sf.write(output_filepath, data, read_sr)
@@ -125,7 +129,9 @@ def extract_species_snippets(
     """Read aggregate detections, identify top-confidence occurrences per species,
     and generate 9-second snippet clips + metadata index.
     """
+    debug("snippets.start", aggregate=aggregate_path)
     if not os.path.isfile(aggregate_path):
+        debug("snippets.skipped", reason="aggregate_missing", aggregate=aggregate_path)
         return {}
 
     try:
@@ -135,6 +141,7 @@ def extract_species_snippets(
         return {}
 
     if df.empty or "common_name" not in df.columns or "confidence" not in df.columns:
+        debug("snippets.skipped", reason="empty_or_invalid_aggregate", rows=len(df))
         return {}
 
     project_root = _project_root_for_aggregate(aggregate_path)
@@ -163,6 +170,7 @@ def extract_species_snippets(
     group_cols = ["spot", "common_name"] if "spot" in clean_df.columns else ["common_name"]
     best_rows_idx = clean_df.groupby(group_cols)["confidence"].idxmax()
     best_df = clean_df.loc[best_rows_idx]
+    debug("snippets.candidates", rows=len(df), eligible=len(clean_df), candidates=len(best_df))
 
     updated_species = dict(existing_species)
     extracted_count = 0
@@ -189,6 +197,7 @@ def extract_species_snippets(
                     source_fpath = str(candidates[0])
 
         if not os.path.isfile(source_fpath):
+            debug("snippet.skipped", species=common, spot=spot, source=source_fname, reason="source_missing")
             continue
 
         species_key = f"{spot}_{common}" if "spot" in clean_df.columns else common
@@ -198,6 +207,7 @@ def extract_species_snippets(
         if prev_entry and prev_entry.get("max_confidence", 0.0) >= confidence:
             snippet_file = snippets_dir / os.path.basename(prev_entry.get("snippet_rel_path", ""))
             if snippet_file.is_file():
+                debug("snippet.skipped", species=common, spot=spot, reason="existing_equal_or_better")
                 continue
 
         safe_spot = _sanitize_filename(spot)
@@ -234,7 +244,10 @@ def extract_species_snippets(
                 "snippet_rel_path": f"snippets/{snippet_filename}",
             }
             extracted_count += 1
+            debug("snippet.extracted", species=common, spot=spot, confidence=confidence,
+                  duration=act_duration, filename=snippet_filename)
         except Exception as e:
+            debug("snippet.failed", species=common, spot=spot, error=type(e).__name__)
             print(f"[SnippetExtractor] Warning: Could not extract snippet for {common} ({source_fname}): {e}")
 
     result_payload = {
@@ -247,6 +260,17 @@ def extract_species_snippets(
     }
 
     index_path.write_text(json.dumps(result_payload, indent=2))
+    debug("snippets.finish", extracted=extracted_count, total=len(updated_species), index=index_path)
     if extracted_count > 0:
         print(f"[SnippetExtractor] Extracted {extracted_count} top-confidence 9s snippets to {snippets_dir}")
     return result_payload
+
+
+def refresh_species_snippets(aggregate_path: str) -> dict:
+    """Backfill old detections too; an optional clip failure must not fail BirdNET."""
+    try:
+        return extract_species_snippets(aggregate_path)
+    except Exception as exc:
+        debug("snippets.failed", aggregate=aggregate_path, error=type(exc).__name__)
+        print(f"Warning: Failed to extract species audio snippets: {exc}")
+        return {}
