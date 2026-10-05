@@ -3,12 +3,12 @@
 Set `DEBUG=true` in this repo's `.env`, then run:
 
 ```sh
-docker compose up -d --build
+docker compose up -d api frontend
 docker compose logs -f api
 ```
 
 This enables the compute API, pipeline subprocesses, and compute frontend.
-Use `DEBUG=false` (the default) and run `docker compose up -d` to disable it.
+Use `DEBUG=false` (the default) and run `docker compose up -d api frontend` to disable it.
 Compose must recreate containers after an env change; `restart` alone does not apply it.
 Accepted true values: `true`, `1`, `yes`, `on` (case-insensitive).
 
