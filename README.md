@@ -17,14 +17,14 @@ Browser
 
 ## Local setup links
 
-- [Local setup guide](https://github.com/err400/cem-master-backend/blob/yuvika_branch/docs/local-setup.md)
-- [Full setup and environment guide](https://github.com/err400/cem-master-backend/blob/yuvika_branch/CEM_SETUP_GUIDE.md)
+- [Local setup guide](https://github.com/err400/cem-master-backend/blob/main/docs/local-setup.md)
+- [Full setup and environment guide](https://github.com/err400/cem-master-backend/blob/main/CEM_SETUP_GUIDE.md)
 
 
 ## Setup and deployment
 
 For a fresh installation, follow the
-[complete setup guide](https://github.com/err400/cem-master-backend/blob/yuvika_branch/CEM_SETUP_GUIDE.md).
+[complete setup guide](https://github.com/err400/cem-master-backend/blob/main/CEM_SETUP_GUIDE.md).
 It covers all four repositories, environment roles, private credential generation,
 shared-data mounts, database migrations, and production proxy configuration.
 The deployment folder name is `cem-backend`.
