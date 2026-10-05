@@ -4,7 +4,7 @@ The **compute** side of CEM: a FastAPI server that runs BirdNET and the
 ecological analysis pipeline over uploaded audio, and publishes finished
 projects for the public catalogue.
 
-This repo owns the whole compute stack. One command starts all three services.
+This repo owns the compute API and frontend. FileBrowser is optional.
 
 ```text
 Browser
@@ -15,7 +15,29 @@ Browser
                                      └─▶ read-only by cem-master-backend's indexer
 ```
 
-## Quick start
+## Local setup links
+
+- [Local setup guide](https://github.com/err400/cem-master-backend/blob/main/docs/local-setup.md)
+- [Full setup and environment guide](https://github.com/err400/cem-master-backend/blob/main/CEM_SETUP_GUIDE.md)
+
+
+## Setup and deployment
+
+For a fresh installation, follow the
+[complete setup guide](https://github.com/err400/cem-master-backend/blob/main/CEM_SETUP_GUIDE.md).
+It covers all four repositories, environment roles, private credential generation,
+shared-data mounts, database migrations, and production proxy configuration.
+The deployment folder name is `cem-backend`.
+
+Compute UI: https://www.cse.iitd.ernet.in/act4dws5/bio/
+
+Set `ALLOWED_ORIGINS=https://www.cse.iitd.ernet.in` and configure `SERVER_BASE_URL`
+to the confirmed public compute API base. The UI URL alone does not identify the
+backend proxy route. Example credentials in `.env.example` are not production
+credentials; keep actual passwords in private `.env` files.
+
+## Compute-only local start
+
 
 Clone the two compute repos **side by side** — compose builds the frontend from
 `../cem-frontend`:
@@ -27,20 +49,22 @@ your-workspace/
 ```
 
 ```bash
-cp .env.example .env
-docker compose up -d --build
-curl localhost:8002/health          # {"status":"ok", ...}
+test -f .env || cp .env.example .env
+mkdir -p data/projects logs
+docker compose config --quiet
+docker compose up -d --build api frontend
+curl --fail localhost:8002/health          # {"status":"ok", ...}
 ```
 
 | | |
 | --- | --- |
 | Compute page | <http://localhost:8080> |
 | API docs | <http://localhost:8002/docs> |
-| FileBrowser | <http://localhost:8097> |
+| FileBrowser (only when enabled) | <http://localhost:8097> |
 
 `./pipeline` and `./server/app` are bind-mounted, so editing a script needs
-`docker compose restart api`, not a rebuild. Rebuild only when
-`requirements.txt` changes.
+`docker compose restart api`, not a rebuild. Rebuild when the Dockerfile or either `requirements.txt` or
+`server/requirements-server.txt` changes.
 
 > The frontend used to live in `cem-frontend/docker-compose.yml`. That file was
 > removed: two compose files meant two ways to start one system, and they
@@ -107,17 +131,12 @@ POST /api/v1/projects/publish          project        ← "Make public"
 ```
 
 `/analyze` is **synchronous** when Airflow is not configured: the HTTP call
-blocks for the whole run and the response carries the result. 24 minutes of
-audio takes about a minute on CPU.
+blocks for the whole run and the response carries the result. Runtime depends on recording duration, worker count and server resources;
+configure proxy timeouts for the selected execution mode.
 
 `spots_geo` (`[{"name", "lat", "lon"}]`) is the **only** place coordinates ever
 reach disk, as `<job>/input/geo.json`. A spot analysed without it can never be
 placed on the master map.
-
-> Song Meter recorders already write their GPS into each WAV's GUANO chunk.
-> `cem-master-backend/scripts/dev_compute_e2e.py` reads it, so nobody types
-> coordinates. Doing the same in `upload/audio` would remove a whole class of
-> "spot is in the wrong place" bugs — worth doing.
 
 `publish` refuses with **409** unless there is a completed server-side BirdNET
 job *and* `dataset/aggregate.csv`. That guard is deliberate: a project with no
@@ -135,20 +154,19 @@ audio is skipped. Use a new project name if you want to watch BirdNET work.
 the hash in `job.json`. The master indexer reads those hashes and turns them into
 download links on the public page. It never creates or revokes one.
 
-Off by default. To enable:
+Off by default. Configure access controls and private credentials before starting
+`filebrowser` with `docker compose up -d filebrowser`. Its current port mapping
+exposes port 8097 on all host interfaces. To enable share creation:
 
 ```dotenv
 FILEBROWSER_BASE_URL=http://filebrowser:80
-FILEBROWSER_PASSWORD=<the real password>
+FILEBROWSER_PASSWORD=REPLACE_WITH_PRIVATE_PASSWORD
 ```
 
-> **The password is not `admin`.** Recent FileBrowser images generate a random
-> one on first start and print it once:
-> ```bash
-> docker compose logs filebrowser | grep -i password
-> ```
-> Set a known one instead with
-> `docker compose exec filebrowser filebrowser users update admin --password X`.
+Recent FileBrowser images generate an initial password on first startup.
+Retrieve it privately from the service logs or configure a known password using
+the installed FileBrowser administration tools. Set the matching value only in
+private `.env`; do not paste credential-bearing logs into documentation.
 
 Three things to know before enabling this on real data:
 
@@ -176,7 +194,7 @@ pip install earthengine-api && earthengine authenticate
 Then in `.env` — an absolute path, because `~` does not expand in a volume mount:
 
 ```dotenv
-GEE_PROJECT=ee-geeapi
+GEE_PROJECT=YOUR_AUTHORIZED_PROJECT
 EARTHENGINE_CREDENTIALS=/absolute/path/to/.config/earthengine
 ```
 
@@ -237,6 +255,6 @@ Dockerfile         CPU by default; build args switch to CUDA
 
 ## Related
 
-- [cem-frontend](../cem-frontend) — the compute page this compose file starts
-- [cem-master-backend](../cem-master-backend) — indexes public projects from `DATA_DIR`
-- [cem-master-frontend](../cem-master-frontend) — the public map
+- [cem-frontend](https://github.com/err400/cem-frontend) — the compute page this compose file starts
+- [cem-master-backend](https://github.com/err400/cem-master-backend) — indexes public projects from `DATA_DIR`
+- [cem-master-frontend](https://github.com/err400/cem-master-frontend) — the public map
