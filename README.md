@@ -26,7 +26,7 @@ flowchart TB
     UICode["Host cem-frontend assets<br/>mounted into /usr/share/nginx/html"]
     Models["Required separate models/ mount to /app/models<br/>NOT configured in current Compose"]
     Data["Shared host data/ mounted at /data<br/>projects: input WAVs, caches, job outputs<br/>aggregate CSVs, snippets and STAC sidecars"]
-    Logs["Current host logs/ mounted at /logs<br/>task logs also under project data<br/>required target: data/logs/cem-backend"]
+    Logs["Host data/logs/cem-backend to /logs<br/>app.log and activity audit trail<br/>LOG_LEVEL debug / info / error"]
     GEE["Optional Google Earth Engine<br/>stratification; separate EE credentials"]
     Drive["Optional Google OAuth and Drive sync<br/>frontend integration; backend SSO enforcement missing"]
     FB["Optional FileBrowser Docker<br/>same data mounted at /srv<br/>output-share view and download"]
@@ -77,8 +77,8 @@ server's shared data and are not sufficient for server publication.
 
 The model node is a required change, not an existing mount. Master has no model
 weights; compute uses BirdNET loaders, whose model paths must be configured when
-introducing that mount. Current API diagnostic output is mainly stdout and does
-not yet implement the checklist's persistent three-level logging requirement.
+introducing that mount. API request and job diagnostics are written to stdout and persistent
+`data/logs/cem-backend/app.log`, selected by `LOG_LEVEL=debug|info|error`.
 Compute currently uses its own retention worker; full checklist compliance needs
 a compute policy file and host-managed enforcement. Separate compute UI/API
 containers also remain a checklist gap. External GEE and Drive services are
@@ -138,6 +138,32 @@ curl --fail localhost:8002/health          # {"status":"ok", ...}
 > The frontend used to live in `cem-frontend/docker-compose.yml`. That file was
 > removed: two compose files meant two ways to start one system, and they
 > drifted. One repo owns each service now.
+
+## Log Levels and API Requests
+
+Set `LOG_LEVEL` in the compute backend `.env`; Compose passes it to API/pipeline
+and frontend. `DEBUG=true` remains a legacy override; otherwise use `DEBUG=false`.
+
+| Level | Description |
+|---|---|
+| `debug` | Detailed request/upload/pipeline traces and browser diagnostics, plus normal events and failures |
+| `info` | Default: startup, completed API request summaries, job starts/results and failures |
+| `error` | Failed HTTP requests (4xx/5xx), unhandled exception types and job failures |
+
+API summaries include method, route template, status, elapsed milliseconds and a
+request ID, without headers, query strings or bodies. The API middleware runs at
+all levels and preserves streaming responses. Browser traces are enabled only
+at debug. Application logs persist at `data/logs/cem-backend/app.log` by default;
+`HOST_LOG_DIR` can override that host location. Pipeline/audit/third-party logs
+have separate behavior. See the
+[logging guide](https://github.com/err400/cem-backend/blob/master/DEBUGGING.md).
+
+```bash
+# From the compute backend checkout, after editing .env:
+docker compose up -d api frontend
+docker compose logs -f api
+tail -f data/logs/cem-backend/app.log
+```
 
 ## Configuration
 
