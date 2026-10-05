@@ -17,17 +17,14 @@ Browser
 
 ## Local setup links
 
-- [Local setup in the sibling checkout](../cem-master-backend/docs/local-setup.md)
-- [Local setup on GitHub](https://github.com/err400/cem-master-backend/blob/HEAD/docs/local-setup.md)
-- [Full setup/environment guide in the sibling checkout](../cem-master-backend/CEM_SETUP_GUIDE.md)
+- [Local setup guide](https://github.com/err400/cem-master-backend/blob/yuvika_branch/docs/local-setup.md)
+- [Full setup and environment guide](https://github.com/err400/cem-master-backend/blob/yuvika_branch/CEM_SETUP_GUIDE.md)
 
-The local guide includes all four clone commands and the database/Alembic startup
-sequence. Keep the four repositories side by side so the local links work.
 
 ## Setup and deployment
 
 For a fresh installation, follow the
-[complete setup guide](https://github.com/err400/cem-master-backend/blob/HEAD/CEM_SETUP_GUIDE.md).
+[complete setup guide](https://github.com/err400/cem-master-backend/blob/yuvika_branch/CEM_SETUP_GUIDE.md).
 It covers all four repositories, environment roles, private credential generation,
 shared-data mounts, database migrations, and production proxy configuration.
 The deployment folder name is `cem-backend`.
