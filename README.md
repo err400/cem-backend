@@ -6,83 +6,59 @@ projects for the public catalogue.
 
 This repo owns the compute API and frontend. FileBrowser is optional.
 
-## Architecture Diagram
+## Architecture
 
-This diagram shows current execution and storage, with unmet cluster requirements
-marked **required, not configured**. Solid arrows show current paths; dotted
-arrows show optional integrations or required changes. `AIRFLOW_BASE_URL` is the
-current switch; the checklist calls it `AIRFLOW_API_BASE` (not supported yet).
+### How analysis runs
 
 ```mermaid
-flowchart TB
-    Browser["Researcher browser"]
-    UI["Compute frontend Docker<br/>Nginx :80 / host :8080<br/>SERVER_BASE_URL from env"]
-    API["Compute API Docker<br/>FastAPI :8000 / host :8002<br/>server analysis and publication"]
-    Dispatch{"AIRFLOW_BASE_URL set?"}
-    Local["Local compute in API container<br/>BirdNET and ecological pipeline"]
-    Airflow["Optional Airflow-STACD Docker<br/>trigger DAG and poll run"]
-    Callback["Worker callback to compute /api/v1/scripts<br/>worker routing/configuration must be provisioned"]
-    Code["Host code mounts<br/>pipeline to /app/pipeline<br/>server/app to /app/app"]
-    UICode["Host cem-frontend assets<br/>mounted into /usr/share/nginx/html"]
-    Models["Required separate models/ mount to /app/models<br/>NOT configured in current Compose"]
-    Data["Shared host data/ mounted at /data<br/>projects: input WAVs, caches, job outputs<br/>aggregate CSVs, snippets and STAC sidecars"]
-    Logs["Host data/logs/cem-backend to /logs<br/>app.log and activity audit trail<br/>LOG_LEVEL debug / info / error"]
-    GEE["Optional Google Earth Engine<br/>stratification; separate EE credentials"]
-    Drive["Optional Google OAuth and Drive sync<br/>frontend integration; backend SSO enforcement missing"]
-    FB["Optional FileBrowser Docker<br/>same data mounted at /srv<br/>output-share view and download"]
-    Sweep["Current compute retention worker<br/>RETENTION_HOURS; public projects exempt"]
-    Policy["Required compute outputs.yaml<br/>public / private_persistent / delete with ttl_days<br/>NOT present in compute repo"]
-    HostService["Cluster host data service<br/>external; not started by Compose"]
-    Master["Master indexer<br/>reads public project data at /data"]
-    DB[("Central PostgreSQL<br/>master catalogue; compute has no DB")]
-
-    Browser -->|"open UI; upload; queue server analysis"| UI
-    UI -->|"API requests via configured base"| API
-    UI -.->|"optional login and sync"| Drive
-    API --> Dispatch
-    Dispatch -->|"empty: synchronous execution"| Local
-    Dispatch -->|"set: backend triggers and polls"| Airflow
-    Airflow -.->|"worker calls server execution route"| Callback
-    Callback -.-> Local
-    Code --> API
-    Code --> Local
-    UICode --> UI
-    Models -.->|"required model location; loader must be configured"| Local
-    API -->|"uploads and project/job metadata"| Data
-    Local -->|"success: compute outputs"| Data
-    API -->|"activity/log paths"| Logs
-    Local -->|"task logs"| Data
-    API -.->|"stratification"| GEE
-    API -.->|"create output shares when enabled"| FB
-    Browser -.->|"download share links"| FB
-    FB -->|"view/download"| Data
-    Sweep -->|"current job-directory cleanup"| Data
-    Policy -.->|"required policy input"| HostService
-    HostService -.->|"publish, persist or delete per policy"| Data
-    HostService -.->|"required persistent log policy"| Logs
-    API -->|"Make Public sets project visibility"| Data
-    Data -->|"public projects only"| Master
-    Master -->|"write catalogue"| DB
+flowchart TD
+    Browser["Browser"] --> UI["Compute UI"]
+    UI -->|"Upload and run analysis"| API["Compute API"]
+    API --> Mode{"Airflow configured?"}
+    Mode -->|"No"| Pipeline["Local pipeline"]
+    Mode -->|"Yes: trigger and poll"| Airflow["Airflow worker"]
+    Airflow -->|"Call compute execution API"| Pipeline
+    Pipeline -->|"Save results"| Data["Shared data folder"]
+    API -->|"Make Public"| Data
+    Data -->|"Public projects"| Master["Master indexer"]
 ```
 
-The browser calls the compute API, which handles Airflow dispatch and polling;
-it does not need direct Airflow access for server analysis. Local execution does
-not require an Airflow host. On the current Airflow path, the worker calls the
-compute execution endpoint; worker/callback connectivity must be configured on
-the cluster, and no `CORESTACK_API_BASE` setting is currently exposed here.
+The current switch is `AIRFLOW_BASE_URL`: blank runs locally, set dispatches via
+Airflow. The checklist's name `AIRFLOW_API_BASE` is not implemented yet. Airflow
+worker callback routing must be configured on the cluster. The UI and API are
+currently separate containers; the browser calls the API through `SERVER_BASE_URL`.
 
-A local browser watcher is a separate execution option: it reads browser-selected
-project files and writes local results. These files are not automatically the
-server's shared data and are not sufficient for server publication.
+### Where files live
 
-The model node is a required change, not an existing mount. Master has no model
-weights; compute uses BirdNET loaders, whose model paths must be configured when
-introducing that mount. API request and job diagnostics are written to stdout and persistent
-`data/logs/cem-backend/app.log`, selected by `LOG_LEVEL=debug|info|error`.
-Compute currently uses its own retention worker; full checklist compliance needs
-a compute policy file and host-managed enforcement. Separate compute UI/API
-containers also remain a checklist gap. External GEE and Drive services are
-optional; no GeoServer or object-storage integration is configured in this flow.
+```mermaid
+flowchart LR
+    Code["Host code"] --> API["Compute API"]
+    Models["Host models: pending"] -.-> API
+    API --> Data["Shared data"]
+    API --> Logs["Persistent logs"]
+    Data --> FB["FileBrowser: optional"]
+    Data --> Retention["Retention worker"]
+```
+
+| Resource | Current location / behavior |
+|---|---|
+| API and pipeline code | Host `server/app` → `/app/app`; `pipeline` → `/app/pipeline` |
+| UI code | Host frontend assets → `/usr/share/nginx/html` in the UI container |
+| Models | Separate `models/` → `/app/models` mount and loader configuration are **pending** |
+| Inputs and results | Shared host data folder → `/data`; projects contain WAVs, caches, results, snippets and STAC metadata |
+| Logs | Shared data `logs/cem-backend/` → `/logs`; `LOG_LEVEL=debug/info/error`; task logs also live inside project results |
+| Downloads | Optional FileBrowser mounts the same data at `/srv` |
+| Retention | Current compute worker uses `RETENTION_HOURS`; public projects are exempt |
+
+For cluster compliance, compute still needs `outputs.yaml` covering **public**,
+**private_persistent**, and **delete** outputs, enforced by the external host data
+service. That policy and enforcement are not currently configured.
+
+Optional external services: **Google Drive** for browser sync and **Google Earth
+Engine** for stratification. Browser Google login does not yet enforce backend
+SSO. Compute has no database; the master indexer writes to central PostgreSQL.
+The browser-local watcher is a separate option and does not automatically write
+to the server's shared folder or produce a publishable server job.
 
 ## Local setup links
 
