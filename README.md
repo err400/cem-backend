@@ -1,4 +1,4 @@
-# cem-backend
+# CEM Compute — Audio Analysis and Publication API
 
 The **compute** side of CEM: a FastAPI server that runs BirdNET and the
 ecological analysis pipeline over uploaded audio, and publishes finished
