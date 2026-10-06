@@ -2,6 +2,8 @@ import asyncio
 import os
 import subprocess
 import sys
+import tempfile
+from pathlib import Path
 import unittest
 from types import SimpleNamespace
 from unittest.mock import patch
@@ -16,7 +18,7 @@ class DebugTests(unittest.TestCase):
             with self.subTest(value=value):
                 result = subprocess.run(
                     [sys.executable, "-c", "from app.debug import debug; debug('probe', count=3)"],
-                    env={**os.environ, "DEBUG": value}, capture_output=True, text=True, check=True,
+                    env={**os.environ, "DEBUG": value, "LOG_LEVEL": "info"}, capture_output=True, text=True, check=True,
                 )
                 self.assertEqual("probe" in result.stderr, enabled)
                 self.assertEqual(result.stdout, "")
@@ -50,7 +52,7 @@ class DebugTests(unittest.TestCase):
 
         scope = {"type": "http", "method": "GET", "path": "/clips/private.wav",
                  "query_string": b"token=secret", "headers": [(b"authorization", b"secret")]}
-        with patch.object(diagnostics, "DEBUG", True), patch.object(diagnostics, "debug") as log:
+        with patch.object(diagnostics, "DEBUG", True), patch.object(diagnostics, "info") as log:
             asyncio.run(diagnostics.DebugRequests(app)(scope, receive, send))
             self.assertEqual(received, messages)
             self.assertEqual(log.call_args.kwargs["status"], 206)
@@ -58,11 +60,37 @@ class DebugTests(unittest.TestCase):
             self.assertNotIn("secret", str(log.call_args_list))
             self.assertNotIn("private.wav", str(log.call_args_list))
 
+    def test_levels_and_persistent_log(self):
+        for level, expected in [("debug", ["trace", "normal", "failure"]),
+                                ("info", ["normal", "failure"]),
+                                ("error", ["failure"])]:
+            with self.subTest(level=level), tempfile.TemporaryDirectory() as directory:
+                result = subprocess.run(
+                    [sys.executable, "-c", "from app.debug import debug,info,error; debug('trace'); info('normal'); error('failure')"],
+                    env={**os.environ, "DEBUG": "false", "LOG_LEVEL": level, "LOG_DIR": directory},
+                    capture_output=True, text=True, check=True,
+                )
+                persisted = (Path(directory) / "app.log").read_text()
+                for event in ["trace", "normal", "failure"]:
+                    self.assertEqual(event in result.stderr, event in expected)
+                    self.assertEqual(event in persisted, event in expected)
+
+    def test_failed_http_status_logged_at_error_level(self):
+        async def app(scope, receive, send):
+            scope["route"] = SimpleNamespace(path="/jobs/{job_id}")
+            await send({"type": "http.response.start", "status": 404, "headers": []})
+        async def send(message):
+            pass
+        with patch.object(diagnostics, "error") as log, patch.object(diagnostics, "info") as normal:
+            asyncio.run(diagnostics.DebugRequests(app)({"type": "http", "method": "GET"}, None, send))
+            self.assertEqual(log.call_args.kwargs["status"], 404)
+            normal.assert_not_called()
+
     def test_exception_propagates(self):
         async def app(scope, receive, send):
             raise RuntimeError("private exception detail")
 
-        with patch.object(diagnostics, "DEBUG", True), patch.object(diagnostics, "debug") as log:
+        with patch.object(diagnostics, "DEBUG", True), patch.object(diagnostics, "error") as log:
             with self.assertRaises(RuntimeError):
                 asyncio.run(diagnostics.DebugRequests(app)({"type": "http", "method": "GET"}, None, None))
             self.assertEqual(log.call_args.kwargs["status"], 500)

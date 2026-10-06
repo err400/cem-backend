@@ -8,6 +8,7 @@ services:
     ports:
       - "${COMPUTE_BACKEND_PORT:-8002}:8000"
     environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
       DEBUG: ${DEBUG:-false}
       MAX_UPLOAD_MB: ${MAX_UPLOAD_MB:-2048}
       LOG_DIR: ${LOG_DIR:-/logs}
@@ -43,7 +44,7 @@ services:
       FILEBROWSER_TIMEOUT: ${FILEBROWSER_TIMEOUT:-10}
     volumes:
       - ${CEM_DATA_DIR_HOST:-${HOST_DATA_DIR:-./data}}:/data
-      - ${HOST_LOG_DIR:-./logs}:/logs
+      - ${HOST_LOG_DIR:-${CEM_DATA_DIR_HOST:-${HOST_DATA_DIR:-./data}}/logs/cem-backend}:/logs
       - ./pipeline:/app/pipeline
       - ./server/app:/app/app
       - ${EARTHENGINE_CREDENTIALS:-~/.config/earthengine}:/root/.config/earthengine:ro
@@ -64,6 +65,7 @@ services:
     ports:
       - "${COMPUTE_FRONTEND_PORT:-8080}:80"
     environment:
+      LOG_LEVEL: ${LOG_LEVEL:-info}
       DEBUG: ${DEBUG:-false}
       # Baked into js/core/Config.js when the container starts. This is the
       # address the BROWSER uses, so it is localhost and the host-published
