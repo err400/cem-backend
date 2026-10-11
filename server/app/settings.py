@@ -53,6 +53,12 @@ class Settings:
         self.FILEBROWSER_USERNAME: str = os.environ.get("FILEBROWSER_USERNAME", "")
         self.FILEBROWSER_PASSWORD: str = os.environ.get("FILEBROWSER_PASSWORD", "")
         self.FILEBROWSER_TIMEOUT: float = float(os.environ.get("FILEBROWSER_TIMEOUT", "10"))
+        # Where OUR DATA_DIR sits inside FileBrowser's root (/srv). Blank when
+        # FileBrowser mounts DATA_DIR itself, as the local compose does. On a
+        # shared deployment FileBrowser's root is a parent folder holding several
+        # services' data, so every share path must be prefixed, e.g. "cem".
+        # Same role as TCP_FILEBROWSER_PROJECTS_PATH in TreeCrownDetection.
+        self.FILEBROWSER_PROJECTS_PATH: str = os.environ.get("FILEBROWSER_PROJECTS_PATH", "").strip().strip("/")
         # ---- GEE (optional) ----
         self.GEE_PROJECT: str = os.environ.get("GEE_PROJECT", "ee-geeapi")
         self.GEE_SERVICE_ACCOUNT: str = os.environ.get("GEE_SERVICE_ACCOUNT", "")

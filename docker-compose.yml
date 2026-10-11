@@ -42,6 +42,9 @@ services:
       FILEBROWSER_USERNAME: ${FILEBROWSER_USERNAME:-admin}
       FILEBROWSER_PASSWORD: ${FILEBROWSER_PASSWORD:-admin}
       FILEBROWSER_TIMEOUT: ${FILEBROWSER_TIMEOUT:-10}
+      # Blank locally (FileBrowser below mounts DATA_DIR as its root). On a
+      # shared FileBrowser set this to our folder under its root, e.g. "cem".
+      FILEBROWSER_PROJECTS_PATH: ${FILEBROWSER_PROJECTS_PATH:-}
     volumes:
       - ${CEM_DATA_DIR_HOST:-${HOST_DATA_DIR:-./data}}:/data
       - ${HOST_LOG_DIR:-${CEM_DATA_DIR_HOST:-${HOST_DATA_DIR:-./data}}/logs/cem-backend}:/logs

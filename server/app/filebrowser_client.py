@@ -78,10 +78,25 @@ def _request(
         raise
 
 
+def share_path(rel: str) -> str:
+    """Map a DATA_DIR-relative path to the path FileBrowser knows it by.
+
+    Locally FileBrowser mounts DATA_DIR as its root, so the two are the same.
+    On a shared deployment FileBrowser's root is a parent folder with several
+    services' data under it, and ours sits at FILEBROWSER_PROJECTS_PATH. Without
+    the prefix every POST /api/share/projects/... answers 404 and, because the
+    caller is best-effort, the only trace is a one-line warning in the job log
+    and "Not shared" on the master page.
+    """
+    rel = rel.strip("/")
+    prefix = get_settings().FILEBROWSER_PROJECTS_PATH
+    return f"{prefix}/{rel}" if prefix else rel
+
+
 def create_share(path: str) -> dict | None:
-    """Create a public share link for *path* (relative to the DATA_DIR-backed
-    FileBrowser root). Returns the share record (hash, path, expire,
-    hasPassword) or None if FileBrowser is not configured.
+    """Create a public share link for *path* (relative to DATA_DIR; the
+    FileBrowser-side prefix is applied here). Returns the share record (hash,
+    path, expire, hasPassword) or None if FileBrowser is not configured.
 
     The empty JSON body is REQUIRED, not decorative. FileBrowser's
     sharePostHandler does:
@@ -103,7 +118,16 @@ def create_share(path: str) -> dict | None:
     """
     if not is_configured():
         return None
-    return _request("POST", path, body={})
+    try:
+        return _request("POST", share_path(path), body={})
+    except urllib.error.HTTPError as e:
+        # Re-raise with the body: FileBrowser's 404 for a path outside its root
+        # and its 403 for a bad token are otherwise indistinguishable in the
+        # one-line warning runner.py writes to the job log.
+        detail = e.read().decode(errors="replace")[:300]
+        raise RuntimeError(
+            f"FileBrowser share API returned {e.code} for {share_path(path)!r}: {detail or e.reason}"
+        ) from e
 
 
 def delete_share(hash_: str) -> None:
