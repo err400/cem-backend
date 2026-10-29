@@ -103,6 +103,12 @@ SPECIES_TO_PLOT:    list[str] | None = None  # 09_timeseries (None = top N)
 #   --dataset-spots S [S ...]    -> DATASET_SPOTS       (spot per INPUT_DIRECTORIES entry)
 #   --dataset-spots-file PATH    -> DATASET_SPOTS       (newline-delimited variant)
 #   --input-file-list F [F ...]  -> INPUT_FILE_LIST     (explicit reference files)
+#   --input-file-list-file PATH  -> INPUT_FILE_LIST     (newline-delimited variant; the server
+#                                                         uses this so a job with tens of
+#                                                         thousands of files doesn't hit the
+#                                                         OS argument-length limit)
+#   --input-file-spots S [S ...] -> INPUT_FILE_SPOTS    (spot per INPUT_FILE_LIST entry)
+#   --input-file-spots-file PATH -> INPUT_FILE_SPOTS    (newline-delimited variant)
 #   --aggregate-file PATH        -> AGGREGATE_FILE
 #   --aggregate-file-indices PATH -> AGGREGATE_FILE_INDICES (acoustic_indices)
 #   --processed-file PATH        -> PROCESSED_FILE
@@ -138,7 +144,9 @@ def apply_overrides(argv=None) -> None:
     p.add_argument("--dataset-spots", nargs="*", default=None)
     p.add_argument("--dataset-spots-file", default=None)
     p.add_argument("--input-file-list", nargs="*", default=None)
+    p.add_argument("--input-file-list-file", default=None)
     p.add_argument("--input-file-spots", nargs="*", default=None)
+    p.add_argument("--input-file-spots-file", default=None)
     p.add_argument("--aggregate-file", default=None)
     p.add_argument("--aggregate-file-indices", default=None)
     p.add_argument("--processed-file", default=None)
@@ -180,7 +188,11 @@ def apply_overrides(argv=None) -> None:
         g["DATASET_SPOTS"] = ["" if s == "_" else s for s in _read_lines(args.dataset_spots_file)]
     if args.dataset_spots:
         g["DATASET_SPOTS"] = ["" if s == "_" else s for s in args.dataset_spots]
+    if args.input_file_list_file:
+        g["INPUT_FILE_LIST"] = _read_lines(args.input_file_list_file)
     if args.input_file_list:  g["INPUT_FILE_LIST"] = list(args.input_file_list)
+    if args.input_file_spots_file:
+        g["INPUT_FILE_SPOTS"] = ["" if s == "_" else s for s in _read_lines(args.input_file_spots_file)]
     if args.input_file_spots: g["INPUT_FILE_SPOTS"] = ["" if s == "_" else s for s in args.input_file_spots]
     if args.aggregate_file:   g["AGGREGATE_FILE"] = args.aggregate_file
     if args.aggregate_file_indices: g["AGGREGATE_FILE_INDICES"] = args.aggregate_file_indices

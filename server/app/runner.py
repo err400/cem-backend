@@ -119,14 +119,64 @@ _STEP_TUNABLES: dict[str, dict[str, str]] = {
 }
 
 
+def _is_unset(val) -> bool:
+    """True for values that mean "use the script's own default".
+
+    Callers going through Airflow/STACD receive every declared DAG param, and
+    any the user left empty arrive as the literal string "default_value". Passed
+    through, that reached the script as `--filter-confidence default_value` and
+    crashed it in float(). Every tunable is numeric, so anything that doesn't
+    parse as a number is treated as unset and the script default applies.
+    """
+    if val is None:
+        return True
+    if isinstance(val, (int, float)) and not isinstance(val, bool):
+        return False
+    text = str(val).strip()
+    if not text:
+        return True
+    try:
+        float(text)
+        return False
+    except ValueError:
+        return True
+
+
 def _tunable_flags(step: str, params: dict) -> list[str]:
     """CLI flags for this step's algorithm tunables present in params."""
     flags: list[str] = []
     for key, flag in _STEP_TUNABLES.get(step, {}).items():
         val = params.get(key)
-        if val not in (None, ""):
-            flags += [flag, str(val)]
+        if not _is_unset(val):
+            flags += [flag, str(val).strip()]
     return flags
+
+
+def _file_list_flags(job: Job, step: str) -> list[str]:
+    """Pass the job's audio files (and the spot each belongs to) to the script.
+
+    Written to two newline-delimited files under input/ instead of being put on
+    the command line. A project with tens of thousands of recordings produced an
+    argv larger than the OS allows (E2BIG, "Argument list too long"), so the
+    script never started. The files sit next to audio_spots.json, which makes
+    them a record of exactly what a run was given.
+    """
+    audio_spots = job.get_audio_spots()
+    if not (audio_spots and job.audio_dir.is_dir()):
+        return []
+    files, spots = [], []
+    for f in sorted(job.audio_dir.iterdir()):
+        if f.is_file() and f.name in audio_spots:
+            files.append(str(f))
+            spots.append(audio_spots[f.name] or "_")
+    if not files:
+        return []
+    job.input_dir.mkdir(parents=True, exist_ok=True)
+    list_path = job.input_dir / f"{step}_input_files.txt"
+    spots_path = job.input_dir / f"{step}_input_spots.txt"
+    list_path.write_text("\n".join(files) + "\n")
+    spots_path.write_text("\n".join(spots) + "\n")
+    return ["--input-file-list-file", str(list_path), "--input-file-spots-file", str(spots_path)]
 
 
 def build_command(job: Job, step: str, params: dict) -> list[str]:
@@ -149,16 +199,7 @@ def build_command(job: Job, step: str, params: dict) -> list[str]:
             shutil.copyfile(job.uploaded_processed, job.processed_file)
         cmd += ["--datasets", str(job.audio_dir)]
 
-        all_files, all_spots = [], []
-        audio_spots = job.get_audio_spots()
-        if audio_spots and job.audio_dir.is_dir():
-            for f in sorted(job.audio_dir.iterdir()):
-                if f.is_file() and f.name in audio_spots:
-                    all_files.append(str(f))
-                    all_spots.append(audio_spots[f.name] or "_")
-        if all_files:
-            cmd += ["--input-file-list", *all_files]
-            cmd += ["--input-file-spots", *all_spots]
+        cmd += _file_list_flags(job, step)
 
         cmd += ["--aggregate-file", str(job.work_aggregate)]
         cmd += ["--processed-file", str(job.processed_file)]
@@ -166,8 +207,8 @@ def build_command(job: Job, step: str, params: dict) -> list[str]:
         cmd += ["--ebird-file", str(job.ebird_file())]
         cmd += ["--noise-path", str(job.static_noise())]
         cmd += ["--rain-path", str(job.rain_noise())]
-        if params.get("snr_db") is not None:
-            cmd += ["--snr-db", str(params["snr_db"])]
+        if not _is_unset(params.get("snr_db")):
+            cmd += ["--snr-db", str(params["snr_db"]).strip()]
         cmd += _common_filter_flags(params)
         cmd += _tunable_flags(step, params)
         return cmd
@@ -180,22 +221,13 @@ def build_command(job: Job, step: str, params: dict) -> list[str]:
         indices_agg = out_dir / "indices_aggregate.csv"
         indices_proc = out_dir / "indices_processed_files.txt"
         cmd += ["--datasets", str(job.audio_dir)]
-        all_files, all_spots = [], []
-        audio_spots = job.get_audio_spots()
-        if audio_spots and job.audio_dir.is_dir():
-            for f in sorted(job.audio_dir.iterdir()):
-                if f.is_file() and f.name in audio_spots:
-                    all_files.append(str(f))
-                    all_spots.append(audio_spots[f.name] or "_")
-        if all_files:
-            cmd += ["--input-file-list", *all_files]
-            cmd += ["--input-file-spots", *all_spots]
+        cmd += _file_list_flags(job, step)
         cmd += ["--aggregate-file-indices", str(indices_agg)]
         cmd += ["--processed-file-indices", str(indices_proc)]
         cmd += ["--output-dir", str(out_dir)]
         cmd += ["--noise-path", str(job.static_noise())]
-        if params.get("snr_db") is not None:
-            cmd += ["--snr-db", str(params["snr_db"])]
+        if not _is_unset(params.get("snr_db")):
+            cmd += ["--snr-db", str(params["snr_db"]).strip()]
         cmd += _common_filter_flags(params)
         cmd += _tunable_flags(step, params)
         return cmd

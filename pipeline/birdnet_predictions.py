@@ -254,7 +254,10 @@ def _process_single_file(item):
         return filename, None
     except Exception as e:
         print(f"\n  ERROR processing {filename}: {e}")
-        return filename, None
+        # False, not None: None means "analysed, no detections" and the file is
+        # marked processed; False means "never analysed" and it must stay off
+        # processed_files.txt so the next run retries it.
+        return filename, False
 
 
 def load_processed_files(path: str) -> set[str]:
@@ -448,6 +451,7 @@ def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides
 
     all_detections = []
     processed_this_run = set()
+    failed_this_run: list[str] = []
     already_processed = load_processed_files(processed_files_path)
 
     with ProcessPoolExecutor(
@@ -460,11 +464,14 @@ def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides
         with tqdm(total=len(file_list), desc="BirdNET") as pbar:
             for future in as_completed(futures):
                 filename, result = future.result()
+                pbar.update(1)
+                if result is False:
+                    failed_this_run.append(filename)
+                    continue
                 debug("birdnet.file_finished", filename=filename, detections=0 if result is None else len(result))
                 processed_this_run.add(filename)
                 if result is not None:
                     all_detections.append(result)
-                pbar.update(1)
 
     new_df = pd.DataFrame()
     if all_detections:
@@ -488,6 +495,9 @@ def run_pipeline(file_list, aggregate_path, processed_files_path, spot_overrides
     already_processed.update(processed_this_run)
     save_processed_files(processed_files_path, already_processed)
     print(f"Marked {len(processed_this_run)} files as processed (total: {len(already_processed)})")
+    if failed_this_run:
+        print(f"WARNING: {len(failed_this_run)} file(s) failed and were NOT marked processed; "
+              f"they will be retried on the next run. First few: {failed_this_run[:5]}")
     return new_df
 
 
